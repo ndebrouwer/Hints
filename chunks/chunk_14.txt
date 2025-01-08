@@ -1,0 +1,2500 @@
+            }
+
+            this.half = shiftRight(this.p, one);
+            this.nqr = this.two;
+            let r = this.exp(this.nqr, this.half);
+            while (!this.eq(r, this.negone)) {
+                this.nqr = this.add(this.nqr, this.one);
+                r = this.exp(this.nqr, this.half);
+            }
+
+            this.shift = this.mul(this.nqr, this.nqr);
+            this.shiftInv = this.inv(this.shift);
+
+            this.s = 0;
+            let t = sub(this.p, one);
+
+            while ( !isOdd(t) ) {
+                this.s = this.s + 1;
+                t = shiftRight(t, one);
+            }
+
+            this.w = [];
+            this.w[this.s] = this.exp(this.nqr, t);
+
+            for (let i= this.s-1; i>=0; i--) {
+                this.w[i] = this.square(this.w[i+1]);
+            }
+
+            if (!this.eq(this.w[0], this.one)) {
+                throw new Error("Error calculating roots of unity");
+            }
+
+            this.batchToMontgomery = buildBatchConvert(tm, prefix + "_batchToMontgomery", this.n8, this.n8);
+            this.batchFromMontgomery = buildBatchConvert(tm, prefix + "_batchFromMontgomery", this.n8, this.n8);
+        }
+
+
+        op2(opName, a, b) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp2, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.n8);
+        }
+
+        op2Bool(opName, a, b) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            return !!this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp2);
+        }
+
+        op1(opName, a) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.n8);
+        }
+
+        op1Bool(opName, a) {
+            this.tm.setBuff(this.pOp1, a);
+            return !!this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp3);
+        }
+
+        add(a,b) {
+            return this.op2("_add", a, b);
+        }
+
+
+        eq(a,b) {
+            return this.op2Bool("_eq", a, b);
+        }
+
+        isZero(a) {
+            return this.op1Bool("_isZero", a);
+        }
+
+        sub(a,b) {
+            return this.op2("_sub", a, b);
+        }
+
+        neg(a) {
+            return this.op1("_neg", a);
+        }
+
+        inv(a) {
+            return this.op1("_inverse", a);
+        }
+
+        toMontgomery(a) {
+            return this.op1("_toMontgomery", a);
+        }
+
+        fromMontgomery(a) {
+            return this.op1("_fromMontgomery", a);
+        }
+
+        mul(a,b) {
+            return this.op2("_mul", a, b);
+        }
+
+        div(a, b) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            this.tm.instance.exports[this.prefix + "_inverse"](this.pOp2, this.pOp2);
+            this.tm.instance.exports[this.prefix + "_mul"](this.pOp1, this.pOp2, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.n8);
+        }
+
+        square(a) {
+            return this.op1("_square", a);
+        }
+
+        isSquare(a) {
+            return this.op1Bool("_isSquare", a);
+        }
+
+        sqrt(a) {
+            return this.op1("_sqrt", a);
+        }
+
+        exp(a, b) {
+            if (!(b instanceof Uint8Array)) {
+                b = toLEBuff(e(b));
+            }
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            this.tm.instance.exports[this.prefix + "_exp"](this.pOp1, this.pOp2, b.byteLength, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.n8);
+        }
+
+        isNegative(a) {
+            return this.op1Bool("_isNegative", a);
+        }
+
+        e(a, b) {
+            if (a instanceof Uint8Array) return a;
+            let ra = e(a, b);
+            if (isNegative(ra)) {
+                ra = neg(ra);
+                if (gt(ra, this.p)) {
+                    ra = mod(ra, this.p);
+                }
+                ra = sub(this.p, ra);
+            } else {
+                if (gt(ra, this.p)) {
+                    ra = mod(ra, this.p);
+                }
+            }
+            const buff = leInt2Buff(ra, this.n8);
+            return this.toMontgomery(buff);
+        }
+
+        toString(a, radix) {
+            const an = this.fromMontgomery(a);
+            const s = fromRprLE(an, 0);
+            return toString$6(s, radix);
+        }
+
+        fromRng(rng) {
+            let v;
+            const buff = new Uint8Array(this.n8);
+            do {
+                v = zero;
+                for (let i=0; i<this.n64; i++) {
+                    v = add(v,  shiftLeft(rng.nextU64(), 64*i));
+                }
+                v = band(v, this.mask);
+            } while (geq(v, this.p));
+            toRprLE(buff, 0, v, this.n8);
+            return buff;
+        }
+
+        random() {
+            return this.fromRng(getThreadRng());
+        }
+
+        toObject(a) {
+            const an = this.fromMontgomery(a);
+            return fromRprLE(an, 0);
+        }
+
+        fromObject(a) {
+            const buff = new Uint8Array(this.n8);
+            toRprLE(buff, 0, a, this.n8);
+            return this.toMontgomery(buff);
+        }
+
+        toRprLE(buff, offset, a) {
+            buff.set(this.fromMontgomery(a), offset);
+        }
+
+        toRprBE(buff, offset, a) {
+            const buff2 = this.fromMontgomery(a);
+            for (let i=0; i<this.n8/2; i++) {
+                const aux = buff2[i];
+                buff2[i] = buff2[this.n8-1-i];
+                buff2[this.n8-1-i] = aux;
+            }
+            buff.set(buff2, offset);
+        }
+
+        fromRprLE(buff, offset) {
+            offset = offset || 0;
+            const res = buff.slice(offset, offset + this.n8);
+            return this.toMontgomery(res);
+        }
+
+        async batchInverse(buffIn) {
+            let returnArray = false;
+            const sIn = this.n8;
+            const sOut = this.n8;
+
+            if (Array.isArray(buffIn)) {
+                buffIn = array2buffer(buffIn, sIn );
+                returnArray = true;
+            } else {
+                buffIn = buffIn.slice(0, buffIn.byteLength);
+            }
+
+            const nPoints = Math.floor(buffIn.byteLength / sIn);
+            if ( nPoints * sIn !== buffIn.byteLength) {
+                throw new Error("Invalid buffer size");
+            }
+            const pointsPerChunk = Math.floor(nPoints/this.tm.concurrency);
+            const opPromises = [];
+            for (let i=0; i<this.tm.concurrency; i++) {
+                let n;
+                if (i< this.tm.concurrency-1) {
+                    n = pointsPerChunk;
+                } else {
+                    n = nPoints - i*pointsPerChunk;
+                }
+                if (n==0) continue;
+
+                const buffChunk = buffIn.slice(i*pointsPerChunk*sIn, i*pointsPerChunk*sIn + n*sIn);
+                const task = [
+                    {cmd: "ALLOCSET", var: 0, buff:buffChunk},
+                    {cmd: "ALLOC", var: 1, len:sOut * n},
+                    {cmd: "CALL", fnName: this.prefix + "_batchInverse", params: [
+                        {var: 0},
+                        {val: sIn},
+                        {val: n},
+                        {var: 1},
+                        {val: sOut},
+                    ]},
+                    {cmd: "GET", out: 0, var: 1, len:sOut * n},
+                ];
+                opPromises.push(
+                    this.tm.queueAction(task)
+                );
+            }
+
+            const result = await Promise.all(opPromises);
+
+            let fullBuffOut;
+            if (buffIn instanceof BigBuffer) {
+                fullBuffOut = new BigBuffer(nPoints*sOut);
+            } else {
+                fullBuffOut = new Uint8Array(nPoints*sOut);
+            }
+
+            let p =0;
+            for (let i=0; i<result.length; i++) {
+                fullBuffOut.set(result[i][0], p);
+                p+=result[i][0].byteLength;
+            }
+
+            if (returnArray) {
+                return buffer2array(fullBuffOut, sOut);
+            } else {
+                return fullBuffOut;
+            }
+
+        }
+
+    }
+
+    class WasmField2 {
+
+        constructor(tm, prefix, F) {
+            this.tm = tm;
+            this.prefix = prefix;
+
+            this.F = F;
+            this.type = "F2";
+            this.m = F.m * 2;
+            this.n8 = this.F.n8*2;
+            this.n32 = this.F.n32*2;
+            this.n64 = this.F.n64*2;
+
+            this.pOp1 = tm.alloc(F.n8*2);
+            this.pOp2 = tm.alloc(F.n8*2);
+            this.pOp3 = tm.alloc(F.n8*2);
+            this.tm.instance.exports[prefix + "_zero"](this.pOp1);
+            this.zero = tm.getBuff(this.pOp1, this.n8);
+            this.tm.instance.exports[prefix + "_one"](this.pOp1);
+            this.one = tm.getBuff(this.pOp1, this.n8);
+
+            this.negone = this.neg(this.one);
+            this.two = this.add(this.one, this.one);
+
+        }
+
+        op2(opName, a, b) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp2, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.n8);
+        }
+
+        op2Bool(opName, a, b) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            return !!this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp2);
+        }
+
+        op1(opName, a) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.n8);
+        }
+
+        op1Bool(opName, a) {
+            this.tm.setBuff(this.pOp1, a);
+            return !!this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp3);
+        }
+
+        add(a,b) {
+            return this.op2("_add", a, b);
+        }
+
+        eq(a,b) {
+            return this.op2Bool("_eq", a, b);
+        }
+
+        isZero(a) {
+            return this.op1Bool("_isZero", a);
+        }
+
+        sub(a,b) {
+            return this.op2("_sub", a, b);
+        }
+
+        neg(a) {
+            return this.op1("_neg", a);
+        }
+
+        inv(a) {
+            return this.op1("_inverse", a);
+        }
+
+        isNegative(a) {
+            return this.op1Bool("_isNegative", a);
+        }
+
+        toMontgomery(a) {
+            return this.op1("_toMontgomery", a);
+        }
+
+        fromMontgomery(a) {
+            return this.op1("_fromMontgomery", a);
+        }
+
+        mul(a,b) {
+            return this.op2("_mul", a, b);
+        }
+
+        mul1(a,b) {
+            return this.op2("_mul1", a, b);
+        }
+
+        div(a, b) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            this.tm.instance.exports[this.prefix + "_inverse"](this.pOp2, this.pOp2);
+            this.tm.instance.exports[this.prefix + "_mul"](this.pOp1, this.pOp2, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.n8);
+        }
+
+        square(a) {
+            return this.op1("_square", a);
+        }
+
+        isSquare(a) {
+            return this.op1Bool("_isSquare", a);
+        }
+
+        sqrt(a) {
+            return this.op1("_sqrt", a);
+        }
+
+        exp(a, b) {
+            if (!(b instanceof Uint8Array)) {
+                b = toLEBuff(e(b));
+            }
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            this.tm.instance.exports[this.prefix + "_exp"](this.pOp1, this.pOp2, b.byteLength, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.n8);
+        }
+
+        e(a, b) {
+            if (a instanceof Uint8Array) return a;
+            if ((Array.isArray(a)) && (a.length == 2)) {
+                const c1 = this.F.e(a[0], b);
+                const c2 = this.F.e(a[1], b);
+                const res = new Uint8Array(this.F.n8*2);
+                res.set(c1);
+                res.set(c2, this.F.n8*2);
+                return res;
+            } else {
+                throw new Error("invalid F2");
+            }
+        }
+
+        toString(a, radix) {
+            const s1 = this.F.toString(a.slice(0, this.F.n8), radix);
+            const s2 = this.F.toString(a.slice(this.F.n8), radix);
+            return `[${s1}, ${s2}]`;
+        }
+
+        fromRng(rng) {
+            const c1 = this.F.fromRng(rng);
+            const c2 = this.F.fromRng(rng);
+            const res = new Uint8Array(this.F.n8*2);
+            res.set(c1);
+            res.set(c2, this.F.n8);
+            return res;
+        }
+
+        random() {
+            return this.fromRng(getThreadRng());
+        }
+
+        toObject(a) {
+            const c1 = this.F.toObject(a.slice(0, this.F.n8));
+            const c2 = this.F.toObject(a.slice(this.F.n8, this.F.n8*2));
+            return [c1, c2];
+        }
+
+        fromObject(a) {
+            const buff = new Uint8Array(this.F.n8*2);
+            const b1 = this.F.fromObject(a[0]);
+            const b2 = this.F.fromObject(a[1]);
+            buff.set(b1);
+            buff.set(b2, this.F.n8);
+            return buff;
+        }
+
+        c1(a) {
+            return a.slice(0, this.F.n8);
+        }
+
+        c2(a) {
+            return a.slice(this.F.n8);
+        }
+
+    }
+
+    class WasmField3 {
+
+        constructor(tm, prefix, F) {
+            this.tm = tm;
+            this.prefix = prefix;
+
+            this.F = F;
+            this.type = "F3";
+            this.m = F.m * 3;
+            this.n8 = this.F.n8*3;
+            this.n32 = this.F.n32*3;
+            this.n64 = this.F.n64*3;
+
+            this.pOp1 = tm.alloc(F.n8*3);
+            this.pOp2 = tm.alloc(F.n8*3);
+            this.pOp3 = tm.alloc(F.n8*3);
+            this.tm.instance.exports[prefix + "_zero"](this.pOp1);
+            this.zero = tm.getBuff(this.pOp1, this.n8);
+            this.tm.instance.exports[prefix + "_one"](this.pOp1);
+            this.one = tm.getBuff(this.pOp1, this.n8);
+
+            this.negone = this.neg(this.one);
+            this.two = this.add(this.one, this.one);
+
+        }
+
+        op2(opName, a, b) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp2, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.n8);
+        }
+
+        op2Bool(opName, a, b) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            return !!this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp2);
+        }
+
+        op1(opName, a) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.n8);
+        }
+
+        op1Bool(opName, a) {
+            this.tm.setBuff(this.pOp1, a);
+            return !!this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp3);
+        }
+
+
+        eq(a,b) {
+            return this.op2Bool("_eq", a, b);
+        }
+
+        isZero(a) {
+            return this.op1Bool("_isZero", a);
+        }
+
+        add(a,b) {
+            return this.op2("_add", a, b);
+        }
+
+        sub(a,b) {
+            return this.op2("_sub", a, b);
+        }
+
+        neg(a) {
+            return this.op1("_neg", a);
+        }
+
+        inv(a) {
+            return this.op1("_inverse", a);
+        }
+
+        isNegative(a) {
+            return this.op1Bool("_isNegative", a);
+        }
+
+        toMontgomery(a) {
+            return this.op1("_toMontgomery", a);
+        }
+
+        fromMontgomery(a) {
+            return this.op1("_fromMontgomery", a);
+        }
+
+        mul(a,b) {
+            return this.op2("_mul", a, b);
+        }
+
+        div(a, b) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            this.tm.instance.exports[this.prefix + "_inverse"](this.pOp2, this.pOp2);
+            this.tm.instance.exports[this.prefix + "_mul"](this.pOp1, this.pOp2, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.n8);
+        }
+
+        square(a) {
+            return this.op1("_square", a);
+        }
+
+        isSquare(a) {
+            return this.op1Bool("_isSquare", a);
+        }
+
+        sqrt(a) {
+            return this.op1("_sqrt", a);
+        }
+
+        exp(a, b) {
+            if (!(b instanceof Uint8Array)) {
+                b = toLEBuff(e(b));
+            }
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            this.tm.instance.exports[this.prefix + "_exp"](this.pOp1, this.pOp2, b.byteLength, this.pOp3);
+            return this.getBuff(this.pOp3, this.n8);
+        }
+
+        e(a, b) {
+            if (a instanceof Uint8Array) return a;
+            if ((Array.isArray(a)) && (a.length == 3)) {
+                const c1 = this.F.e(a[0], b);
+                const c2 = this.F.e(a[1], b);
+                const c3 = this.F.e(a[2], b);
+                const res = new Uint8Array(this.F.n8*3);
+                res.set(c1);
+                res.set(c2, this.F.n8);
+                res.set(c3, this.F.n8*2);
+                return res;
+            } else {
+                throw new Error("invalid F3");
+            }
+        }
+
+        toString(a, radix) {
+            const s1 = this.F.toString(a.slice(0, this.F.n8), radix);
+            const s2 = this.F.toString(a.slice(this.F.n8, this.F.n8*2), radix);
+            const s3 = this.F.toString(a.slice(this.F.n8*2), radix);
+            return `[${s1}, ${s2}, ${s3}]`;
+        }
+
+        fromRng(rng) {
+            const c1 = this.F.fromRng(rng);
+            const c2 = this.F.fromRng(rng);
+            const c3 = this.F.fromRng(rng);
+            const res = new Uint8Array(this.F.n8*3);
+            res.set(c1);
+            res.set(c2, this.F.n8);
+            res.set(c3, this.F.n8*2);
+            return res;
+        }
+
+        random() {
+            return this.fromRng(getThreadRng());
+        }
+
+        toObject(a) {
+            const c1 = this.F.toObject(a.slice(0, this.F.n8));
+            const c2 = this.F.toObject(a.slice(this.F.n8, this.F.n8*2));
+            const c3 = this.F.toObject(a.slice(this.F.n8*2, this.F.n8*3));
+            return [c1, c2, c3];
+        }
+
+        fromObject(a) {
+            const buff = new Uint8Array(this.F.n8*3);
+            const b1 = this.F.fromObject(a[0]);
+            const b2 = this.F.fromObject(a[1]);
+            const b3 = this.F.fromObject(a[2]);
+            buff.set(b1);
+            buff.set(b2, this.F.n8);
+            buff.set(b3, this.F.n8*2);
+            return buff;
+        }
+
+        c1(a) {
+            return a.slice(0, this.F.n8);
+        }
+
+        c2(a) {
+            return a.slice(this.F.n8, this.F.n8*2);
+        }
+
+        c3(a) {
+            return a.slice(this.F.n8*2);
+        }
+
+    }
+
+    class WasmCurve {
+
+        constructor(tm, prefix, F, pGen, pGb, cofactor) {
+            this.tm = tm;
+            this.prefix = prefix;
+            this.F = F;
+
+            this.pOp1 = tm.alloc(F.n8*3);
+            this.pOp2 = tm.alloc(F.n8*3);
+            this.pOp3 = tm.alloc(F.n8*3);
+            this.tm.instance.exports[prefix + "_zero"](this.pOp1);
+            this.zero = this.tm.getBuff(this.pOp1, F.n8*3);
+            this.tm.instance.exports[prefix + "_zeroAffine"](this.pOp1);
+            this.zeroAffine = this.tm.getBuff(this.pOp1, F.n8*2);
+            this.one = this.tm.getBuff(pGen, F.n8*3);
+            this.g = this.one;
+            this.oneAffine = this.tm.getBuff(pGen, F.n8*2);
+            this.gAffine = this.oneAffine;
+            this.b = this.tm.getBuff(pGb, F.n8);
+
+            if (cofactor) {
+                this.cofactor = toLEBuff(cofactor);
+            }
+
+            this.negone = this.neg(this.one);
+            this.two = this.add(this.one, this.one);
+
+            this.batchLEMtoC = buildBatchConvert(tm, prefix + "_batchLEMtoC", F.n8*2, F.n8);
+            this.batchLEMtoU = buildBatchConvert(tm, prefix + "_batchLEMtoU", F.n8*2, F.n8*2);
+            this.batchCtoLEM = buildBatchConvert(tm, prefix + "_batchCtoLEM", F.n8, F.n8*2);
+            this.batchUtoLEM = buildBatchConvert(tm, prefix + "_batchUtoLEM", F.n8*2, F.n8*2);
+            this.batchToJacobian = buildBatchConvert(tm, prefix + "_batchToJacobian", F.n8*2, F.n8*3);
+            this.batchToAffine = buildBatchConvert(tm, prefix + "_batchToAffine", F.n8*3, F.n8*2);
+        }
+
+        op2(opName, a, b) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp2, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.F.n8*3);
+        }
+
+        op2bool(opName, a, b) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, b);
+            return !!this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp2, this.pOp3);
+        }
+
+        op1(opName, a) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.F.n8*3);
+        }
+
+        op1Affine(opName, a) {
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.F.n8*2);
+        }
+
+        op1Bool(opName, a) {
+            this.tm.setBuff(this.pOp1, a);
+            return !!this.tm.instance.exports[this.prefix + opName](this.pOp1, this.pOp3);
+        }
+
+        add(a,b) {
+            if (a.byteLength == this.F.n8*3) {
+                if (b.byteLength == this.F.n8*3) {
+                    return this.op2("_add", a, b);
+                } else if (b.byteLength == this.F.n8*2) {
+                    return this.op2("_addMixed", a, b);
+                } else {
+                    throw new Error("invalid point size");
+                }
+            } else if (a.byteLength == this.F.n8*2) {
+                if (b.byteLength == this.F.n8*3) {
+                    return this.op2("_addMixed", b, a);
+                } else if (b.byteLength == this.F.n8*2) {
+                    return this.op2("_addAffine", a, b);
+                } else {
+                    throw new Error("invalid point size");
+                }
+            } else {
+                throw new Error("invalid point size");
+            }
+        }
+
+        sub(a,b) {
+            if (a.byteLength == this.F.n8*3) {
+                if (b.byteLength == this.F.n8*3) {
+                    return this.op2("_sub", a, b);
+                } else if (b.byteLength == this.F.n8*2) {
+                    return this.op2("_subMixed", a, b);
+                } else {
+                    throw new Error("invalid point size");
+                }
+            } else if (a.byteLength == this.F.n8*2) {
+                if (b.byteLength == this.F.n8*3) {
+                    return this.op2("_subMixed", b, a);
+                } else if (b.byteLength == this.F.n8*2) {
+                    return this.op2("_subAffine", a, b);
+                } else {
+                    throw new Error("invalid point size");
+                }
+            } else {
+                throw new Error("invalid point size");
+            }
+        }
+
+        neg(a) {
+            if (a.byteLength == this.F.n8*3) {
+                return this.op1("_neg", a);
+            } else if (a.byteLength == this.F.n8*2) {
+                return this.op1Affine("_negAffine", a);
+            } else {
+                throw new Error("invalid point size");
+            }
+        }
+
+        double(a) {
+            if (a.byteLength == this.F.n8*3) {
+                return this.op1("_double", a);
+            } else if (a.byteLength == this.F.n8*2) {
+                return this.op1("_doubleAffine", a);
+            } else {
+                throw new Error("invalid point size");
+            }
+        }
+
+        isZero(a) {
+            if (a.byteLength == this.F.n8*3) {
+                return this.op1Bool("_isZero", a);
+            } else if (a.byteLength == this.F.n8*2) {
+                return this.op1Bool("_isZeroAffine", a);
+            } else {
+                throw new Error("invalid point size");
+            }
+        }
+
+        timesScalar(a, s) {
+            if (!(s instanceof Uint8Array)) {
+                s = toLEBuff(e(s));
+            }
+            let fnName;
+            if (a.byteLength == this.F.n8*3) {
+                fnName = this.prefix + "_timesScalar";
+            } else if (a.byteLength == this.F.n8*2) {
+                fnName = this.prefix + "_timesScalarAffine";
+            } else {
+                throw new Error("invalid point size");
+            }
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, s);
+            this.tm.instance.exports[fnName](this.pOp1, this.pOp2, s.byteLength, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.F.n8*3);
+        }
+
+        timesFr(a, s) {
+            let fnName;
+            if (a.byteLength == this.F.n8*3) {
+                fnName = this.prefix + "_timesFr";
+            } else if (a.byteLength == this.F.n8*2) {
+                fnName = this.prefix + "_timesFrAffine";
+            } else {
+                throw new Error("invalid point size");
+            }
+            this.tm.setBuff(this.pOp1, a);
+            this.tm.setBuff(this.pOp2, s);
+            this.tm.instance.exports[fnName](this.pOp1, this.pOp2, this.pOp3);
+            return this.tm.getBuff(this.pOp3, this.F.n8*3);
+        }
+
+        eq(a,b) {
+            if (a.byteLength == this.F.n8*3) {
+                if (b.byteLength == this.F.n8*3) {
+                    return this.op2bool("_eq", a, b);
+                } else if (b.byteLength == this.F.n8*2) {
+                    return this.op2bool("_eqMixed", a, b);
+                } else {
+                    throw new Error("invalid point size");
+                }
+            } else if (a.byteLength == this.F.n8*2) {
+                if (b.byteLength == this.F.n8*3) {
+                    return this.op2bool("_eqMixed", b, a);
+                } else if (b.byteLength == this.F.n8*2) {
+                    return this.op2bool("_eqAffine", a, b);
+                } else {
+                    throw new Error("invalid point size");
+                }
+            } else {
+                throw new Error("invalid point size");
+            }
+        }
+
+        toAffine(a) {
+            if (a.byteLength == this.F.n8*3) {
+                return this.op1Affine("_toAffine", a);
+            } else if (a.byteLength == this.F.n8*2) {
+                return a;
+            } else {
+                throw new Error("invalid point size");
+            }
+        }
+
+        toJacobian(a) {
+            if (a.byteLength == this.F.n8*3) {
+                return a;
+            } else if (a.byteLength == this.F.n8*2) {
+                return this.op1("_toJacobian", a);
+            } else {
+                throw new Error("invalid point size");
+            }
+        }
+
+        toRprUncompressed(arr, offset, a) {
+            this.tm.setBuff(this.pOp1, a);
+            if (a.byteLength == this.F.n8*3) {
+                this.tm.instance.exports[this.prefix + "_toAffine"](this.pOp1, this.pOp1);
+            } else if (a.byteLength != this.F.n8*2) {
+                throw new Error("invalid point size");
+            }
+            this.tm.instance.exports[this.prefix + "_LEMtoU"](this.pOp1, this.pOp1);
+            const res = this.tm.getBuff(this.pOp1, this.F.n8*2);
+            arr.set(res, offset);
+        }
+
+        fromRprUncompressed(arr, offset) {
+            const buff = arr.slice(offset, offset + this.F.n8*2);
+            this.tm.setBuff(this.pOp1, buff);
+            this.tm.instance.exports[this.prefix + "_UtoLEM"](this.pOp1, this.pOp1);
+            return this.tm.getBuff(this.pOp1, this.F.n8*2);
+        }
+
+        toRprCompressed(arr, offset, a) {
+            this.tm.setBuff(this.pOp1, a);
+            if (a.byteLength == this.F.n8*3) {
+                this.tm.instance.exports[this.prefix + "_toAffine"](this.pOp1, this.pOp1);
+            } else if (a.byteLength != this.F.n8*2) {
+                throw new Error("invalid point size");
+            }
+            this.tm.instance.exports[this.prefix + "_LEMtoC"](this.pOp1, this.pOp1);
+            const res = this.tm.getBuff(this.pOp1, this.F.n8);
+            arr.set(res, offset);
+        }
+
+        fromRprCompressed(arr, offset) {
+            const buff = arr.slice(offset, offset + this.F.n8);
+            this.tm.setBuff(this.pOp1, buff);
+            this.tm.instance.exports[this.prefix + "_CtoLEM"](this.pOp1, this.pOp2);
+            return this.tm.getBuff(this.pOp2, this.F.n8*2);
+        }
+
+        toUncompressed(a) {
+            const buff = new Uint8Array(this.F.n8*2);
+            this.toRprUncompressed(buff, 0, a);
+            return buff;
+        }
+
+        toRprLEM(arr, offset, a) {
+            if (a.byteLength == this.F.n8*2) {
+                arr.set(a, offset);
+                return;
+            } else if (a.byteLength == this.F.n8*3) {
+                this.tm.setBuff(this.pOp1, a);
+                this.tm.instance.exports[this.prefix + "_toAffine"](this.pOp1, this.pOp1);
+                const res = this.tm.getBuff(this.pOp1, this.F.n8*2);
+                arr.set(res, offset);
+            } else {
+                throw new Error("invalid point size");
+            }
+        }
+
+        fromRprLEM(arr, offset) {
+            offset = offset || 0;
+            return arr.slice(offset, offset+this.F.n8*2);
+        }
+
+        toString(a, radix) {
+            if (a.byteLength == this.F.n8*3) {
+                const x = this.F.toString(a.slice(0, this.F.n8), radix);
+                const y = this.F.toString(a.slice(this.F.n8, this.F.n8*2), radix);
+                const z = this.F.toString(a.slice(this.F.n8*2), radix);
+                return `[ ${x}, ${y}, ${z} ]`;
+            } else if (a.byteLength == this.F.n8*2) {
+                const x = this.F.toString(a.slice(0, this.F.n8), radix);
+                const y = this.F.toString(a.slice(this.F.n8), radix);
+                return `[ ${x}, ${y} ]`;
+            } else {
+                throw new Error("invalid point size");
+            }
+        }
+
+        isValid(a) {
+            if (this.isZero(a)) return true;
+            const F = this.F;
+            const aa = this.toAffine(a);
+            const x = aa.slice(0, this.F.n8);
+            const y = aa.slice(this.F.n8, this.F.n8*2);
+            const x3b = F.add(F.mul(F.square(x),x), this.b);
+            const y2 = F.square(y);
+            return F.eq(x3b, y2);
+        }
+
+        fromRng(rng) {
+            const F = this.F;
+            let P = [];
+            let greatest;
+            let x3b;
+            do {
+                P[0] = F.fromRng(rng);
+                greatest = rng.nextBool();
+                x3b = F.add(F.mul(F.square(P[0]), P[0]), this.b);
+            } while (!F.isSquare(x3b));
+
+            P[1] = F.sqrt(x3b);
+
+            const s = F.isNegative(P[1]);
+            if (greatest ^ s) P[1] = F.neg(P[1]);
+
+            let Pbuff = new Uint8Array(this.F.n8*2);
+            Pbuff.set(P[0]);
+            Pbuff.set(P[1], this.F.n8);
+
+            if (this.cofactor) {
+                Pbuff = this.timesScalar(Pbuff, this.cofactor);
+            }
+
+            return Pbuff;
+        }
+
+
+
+        toObject(a) {
+            if (this.isZero(a)) {
+                return [
+                    this.F.toObject(this.F.zero),
+                    this.F.toObject(this.F.one),
+                    this.F.toObject(this.F.zero),
+                ];
+            }
+            const x = this.F.toObject(a.slice(0, this.F.n8));
+            const y = this.F.toObject(a.slice(this.F.n8, this.F.n8*2));
+            let z;
+            if (a.byteLength == this.F.n8*3) {
+                z = this.F.toObject(a.slice(this.F.n8*2, this.F.n8*3));
+            } else {
+                z = this.F.toObject(this.F.one);
+            }
+            return [x, y, z];
+        }
+
+        fromObject(a) {
+            const x = this.F.fromObject(a[0]);
+            const y = this.F.fromObject(a[1]);
+            let z;
+            if (a.length==3) {
+                z = this.F.fromObject(a[2]);
+            } else {
+                z = this.F.one;
+            }
+            if (this.F.isZero(z, this.F.one)) {
+                return this.zeroAffine;
+            } else if (this.F.eq(z, this.F.one)) {
+                const buff = new Uint8Array(this.F.n8*2);
+                buff.set(x);
+                buff.set(y, this.F.n8);
+                return buff;
+            } else {
+                const buff = new Uint8Array(this.F.n8*3);
+                buff.set(x);
+                buff.set(y, this.F.n8);
+                buff.set(z, this.F.n8*2);
+                return buff;
+            }
+        }
+
+        e(a) {
+            if (a instanceof Uint8Array) return a;
+            return this.fromObject(a);
+        }
+
+        x(a) {
+            const tmp = this.toAffine(a);
+            return tmp.slice(0, this.F.n8);
+        }
+
+        y(a) {
+            const tmp = this.toAffine(a);
+            return tmp.slice(this.F.n8);
+        }
+
+    }
+
+    /* global WebAssembly */
+
+    function thread(self) {
+        const MAXMEM = 32767;
+        let instance;
+        let memory;
+
+        if (self) {
+            self.onmessage = function(e) {
+                let data;
+                if (e.data) {
+                    data = e.data;
+                } else {
+                    data = e;
+                }
+
+                if (data[0].cmd == "INIT") {
+                    init(data[0]).then(function() {
+                        self.postMessage(data.result);
+                    });
+                } else if (data[0].cmd == "TERMINATE") {
+                    self.close();
+                } else {
+                    const res = runTask(data);
+                    self.postMessage(res);
+                }
+            };
+        }
+
+        async function init(data) {
+            const code = new Uint8Array(data.code);
+            const wasmModule = await WebAssembly.compile(code);
+            memory = new WebAssembly.Memory({initial:data.init, maximum: MAXMEM});
+
+            instance = await WebAssembly.instantiate(wasmModule, {
+                env: {
+                    "memory": memory
+                }
+            });
+        }
+
+
+
+        function alloc(length) {
+            const u32 = new Uint32Array(memory.buffer, 0, 1);
+            while (u32[0] & 3) u32[0]++;  // Return always aligned pointers
+            const res = u32[0];
+            u32[0] += length;
+            if (u32[0] + length > memory.buffer.byteLength) {
+                const currentPages = memory.buffer.byteLength / 0x10000;
+                let requiredPages = Math.floor((u32[0] + length) / 0x10000)+1;
+                if (requiredPages>MAXMEM) requiredPages=MAXMEM;
+                memory.grow(requiredPages-currentPages);
+            }
+            return res;
+        }
+
+        function allocBuffer(buffer) {
+            const p = alloc(buffer.byteLength);
+            setBuffer(p, buffer);
+            return p;
+        }
+
+        function getBuffer(pointer, length) {
+            const u8 = new Uint8Array(memory.buffer);
+            return new Uint8Array(u8.buffer, u8.byteOffset + pointer, length);
+        }
+
+        function setBuffer(pointer, buffer) {
+            const u8 = new Uint8Array(memory.buffer);
+            u8.set(new Uint8Array(buffer), pointer);
+        }
+
+        function runTask(task) {
+            if (task[0].cmd == "INIT") {
+                return init(task[0]);
+            }
+            const ctx = {
+                vars: [],
+                out: []
+            };
+            const u32a = new Uint32Array(memory.buffer, 0, 1);
+            const oldAlloc = u32a[0];
+            for (let i=0; i<task.length; i++) {
+                switch (task[i].cmd) {
+                case "ALLOCSET":
+                    ctx.vars[task[i].var] = allocBuffer(task[i].buff);
+                    break;
+                case "ALLOC":
+                    ctx.vars[task[i].var] = alloc(task[i].len);
+                    break;
+                case "SET":
+                    setBuffer(ctx.vars[task[i].var], task[i].buff);
+                    break;
+                case "CALL": {
+                    const params = [];
+                    for (let j=0; j<task[i].params.length; j++) {
+                        const p = task[i].params[j];
+                        if (typeof p.var !== "undefined") {
+                            params.push(ctx.vars[p.var] + (p.offset || 0));
+                        } else if (typeof p.val != "undefined") {
+                            params.push(p.val);
+                        }
+                    }
+                    instance.exports[task[i].fnName](...params);
+                    break;
+                }
+                case "GET":
+                    ctx.out[task[i].out] = getBuffer(ctx.vars[task[i].var], task[i].len).slice();
+                    break;
+                default:
+                    throw new Error("Invalid cmd");
+                }
+            }
+            const u32b = new Uint32Array(memory.buffer, 0, 1);
+            u32b[0] = oldAlloc;
+            return ctx.out;
+        }
+
+
+        return runTask;
+    }
+
+    var os = {};
+
+    /**
+     * Copyright 2020 Google LLC
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *     http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     */
+    var browser$1 = Worker;
+
+    /* global navigator, WebAssembly */
+    /*
+        Copyright 2019 0KIMS association.
+
+        This file is part of wasmsnark (Web Assembly zkSnark Prover).
+
+        wasmsnark is a free software: you can redistribute it and/or modify it
+        under the terms of the GNU General Public License as published by
+        the Free Software Foundation, either version 3 of the License, or
+        (at your option) any later version.
+
+        wasmsnark is distributed in the hope that it will be useful, but WITHOUT
+        ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+        or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+        License for more details.
+
+        You should have received a copy of the GNU General Public License
+        along with wasmsnark. If not, see <https://www.gnu.org/licenses/>.
+    */
+
+    // const MEM_SIZE = 1000;  // Memory size in 64K Pakes (512Mb)
+    const MEM_SIZE = 25;  // Memory size in 64K Pakes (1600Kb)
+
+    class Deferred {
+        constructor() {
+            this.promise = new Promise((resolve, reject)=> {
+                this.reject = reject;
+                this.resolve = resolve;
+            });
+        }
+    }
+
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function stringToBase64(str) {
+        {
+            return globalThis.btoa(str);
+        }
+    }
+
+    const threadSource = stringToBase64("(" + thread.toString() + ")(self)");
+    const workerSource = "data:application/javascript;base64," + threadSource;
+
+
+
+    async function buildThreadManager(wasm, singleThread) {
+        const tm = new ThreadManager();
+
+        tm.memory = new WebAssembly.Memory({initial:MEM_SIZE});
+        tm.u8 = new Uint8Array(tm.memory.buffer);
+        tm.u32 = new Uint32Array(tm.memory.buffer);
+
+        const wasmModule = await WebAssembly.compile(wasm.code);
+
+        tm.instance = await WebAssembly.instantiate(wasmModule, {
+            env: {
+                "memory": tm.memory
+            }
+        });
+
+        tm.singleThread = singleThread;
+        tm.initalPFree = tm.u32[0];   // Save the Pointer to free space.
+        tm.pq = wasm.pq;
+        tm.pr = wasm.pr;
+        tm.pG1gen = wasm.pG1gen;
+        tm.pG1zero = wasm.pG1zero;
+        tm.pG2gen = wasm.pG2gen;
+        tm.pG2zero = wasm.pG2zero;
+        tm.pOneT = wasm.pOneT;
+
+        //    tm.pTmp0 = tm.alloc(curve.G2.F.n8*3);
+        //    tm.pTmp1 = tm.alloc(curve.G2.F.n8*3);
+
+
+        if (singleThread) {
+            tm.code = wasm.code;
+            tm.taskManager = thread();
+            await tm.taskManager([{
+                cmd: "INIT",
+                init: MEM_SIZE,
+                code: tm.code.slice()
+            }]);
+            tm.concurrency  = 1;
+        } else {
+            tm.workers = [];
+            tm.pendingDeferreds = [];
+            tm.working = [];
+
+            let concurrency;
+
+            if ((typeof(navigator) === "object") && navigator.hardwareConcurrency) {
+                concurrency = navigator.hardwareConcurrency;
+            } else {
+                concurrency = os.cpus().length;
+            }
+
+            if(concurrency == 0){
+                concurrency = 2;
+            }
+
+            // Limit to 64 threads for memory reasons.
+            if (concurrency>64) concurrency=64;
+            tm.concurrency = concurrency;
+
+            for (let i = 0; i<concurrency; i++) {
+
+                tm.workers[i] = new browser$1(workerSource);
+
+                tm.workers[i].addEventListener("message", getOnMsg(i));
+
+                tm.working[i]=false;
+            }
+
+            const initPromises = [];
+            for (let i=0; i<tm.workers.length;i++) {
+                const copyCode = wasm.code.slice();
+                initPromises.push(tm.postAction(i, [{
+                    cmd: "INIT",
+                    init: MEM_SIZE,
+                    code: copyCode
+                }], [copyCode.buffer]));
+            }
+
+            await Promise.all(initPromises);
+
+        }
+        return tm;
+
+        function getOnMsg(i) {
+            return function(e) {
+                let data;
+                if ((e)&&(e.data)) {
+                    data = e.data;
+                } else {
+                    data = e;
+                }
+
+                tm.working[i]=false;
+                tm.pendingDeferreds[i].resolve(data);
+                tm.processWorks();
+            };
+        }
+
+    }
+
+    class ThreadManager {
+        constructor() {
+            this.actionQueue = [];
+            this.oldPFree = 0;
+        }
+
+        startSyncOp() {
+            if (this.oldPFree != 0) throw new Error("Sync operation in progress");
+            this.oldPFree = this.u32[0];
+        }
+
+        endSyncOp() {
+            if (this.oldPFree == 0) throw new Error("No sync operation in progress");
+            this.u32[0] = this.oldPFree;
+            this.oldPFree = 0;
+        }
+
+        postAction(workerId, e, transfers, _deferred) {
+            if (this.working[workerId]) {
+                throw new Error("Posting a job t a working worker");
+            }
+            this.working[workerId] = true;
+
+            this.pendingDeferreds[workerId] = _deferred ? _deferred : new Deferred();
+            this.workers[workerId].postMessage(e, transfers);
+
+            return this.pendingDeferreds[workerId].promise;
+        }
+
+        processWorks() {
+            for (let i=0; (i<this.workers.length)&&(this.actionQueue.length > 0); i++) {
+                if (this.working[i] == false) {
+                    const work = this.actionQueue.shift();
+                    this.postAction(i, work.data, work.transfers, work.deferred);
+                }
+            }
+        }
+
+        queueAction(actionData, transfers) {
+            const d = new Deferred();
+
+            if (this.singleThread) {
+                const res = this.taskManager(actionData);
+                d.resolve(res);
+            } else {
+                this.actionQueue.push({
+                    data: actionData,
+                    transfers: transfers,
+                    deferred: d
+                });
+                this.processWorks();
+            }
+            return d.promise;
+        }
+
+        resetMemory() {
+            this.u32[0] = this.initalPFree;
+        }
+
+        allocBuff(buff) {
+            const pointer = this.alloc(buff.byteLength);
+            this.setBuff(pointer, buff);
+            return pointer;
+        }
+
+        getBuff(pointer, length) {
+            return this.u8.slice(pointer, pointer+ length);
+        }
+
+        setBuff(pointer, buffer) {
+            this.u8.set(new Uint8Array(buffer), pointer);
+        }
+
+        alloc(length) {
+            while (this.u32[0] & 3) this.u32[0]++;  // Return always aligned pointers
+            const res = this.u32[0];
+            this.u32[0] += length;
+            return res;
+        }
+
+        async terminate() {
+            for (let i=0; i<this.workers.length; i++) {
+                this.workers[i].postMessage([{cmd: "TERMINATE"}]);
+            }
+            await sleep(200);
+        }
+
+    }
+
+    function buildBatchApplyKey(curve, groupName) {
+        const G = curve[groupName];
+        const Fr = curve.Fr;
+        const tm = curve.tm;
+
+        curve[groupName].batchApplyKey = async function(buff, first, inc, inType, outType) {
+            inType = inType || "affine";
+            outType = outType || "affine";
+            let fnName, fnAffine;
+            let sGin, sGmid, sGout;
+            if (groupName == "G1") {
+                if (inType == "jacobian") {
+                    sGin = G.F.n8*3;
+                    fnName = "g1m_batchApplyKey";
+                } else {
+                    sGin = G.F.n8*2;
+                    fnName = "g1m_batchApplyKeyMixed";
+                }
+                sGmid = G.F.n8*3;
+                if (outType == "jacobian") {
+                    sGout = G.F.n8*3;
+                } else {
+                    fnAffine = "g1m_batchToAffine";
+                    sGout = G.F.n8*2;
+                }
+            } else if (groupName == "G2") {
+                if (inType == "jacobian") {
+                    sGin = G.F.n8*3;
+                    fnName = "g2m_batchApplyKey";
+                } else {
+                    sGin = G.F.n8*2;
+                    fnName = "g2m_batchApplyKeyMixed";
+                }
+                sGmid = G.F.n8*3;
+                if (outType == "jacobian") {
+                    sGout = G.F.n8*3;
+                } else {
+                    fnAffine = "g2m_batchToAffine";
+                    sGout = G.F.n8*2;
+                }
+            } else if (groupName == "Fr") {
+                fnName = "frm_batchApplyKey";
+                sGin = G.n8;
+                sGmid = G.n8;
+                sGout = G.n8;
+            } else {
+                throw new Error("Invalid group: " + groupName);
+            }
+            const nPoints = Math.floor(buff.byteLength / sGin);
+            const pointsPerChunk = Math.floor(nPoints/tm.concurrency);
+            const opPromises = [];
+            inc = Fr.e(inc);
+            let t = Fr.e(first);
+            for (let i=0; i<tm.concurrency; i++) {
+                let n;
+                if (i< tm.concurrency-1) {
+                    n = pointsPerChunk;
+                } else {
+                    n = nPoints - i*pointsPerChunk;
+                }
+                if (n==0) continue;
+
+                const task = [];
+
+                task.push({
+                    cmd: "ALLOCSET",
+                    var: 0,
+                    buff: buff.slice(i*pointsPerChunk*sGin, i*pointsPerChunk*sGin + n*sGin)
+                });
+                task.push({cmd: "ALLOCSET", var: 1, buff: t});
+                task.push({cmd: "ALLOCSET", var: 2, buff: inc});
+                task.push({cmd: "ALLOC", var: 3, len: n*Math.max(sGmid, sGout)});
+                task.push({
+                    cmd: "CALL",
+                    fnName: fnName,
+                    params: [
+                        {var: 0},
+                        {val: n},
+                        {var: 1},
+                        {var: 2},
+                        {var:3}
+                    ]
+                });
+                if (fnAffine) {
+                    task.push({
+                        cmd: "CALL",
+                        fnName: fnAffine,
+                        params: [
+                            {var: 3},
+                            {val: n},
+                            {var: 3},
+                        ]
+                    });
+                }
+                task.push({cmd: "GET", out: 0, var: 3, len: n*sGout});
+
+                opPromises.push(tm.queueAction(task));
+                t = Fr.mul(t, Fr.exp(inc, n));
+            }
+
+            const result = await Promise.all(opPromises);
+
+            let outBuff;
+            if (buff instanceof BigBuffer) {
+                outBuff = new BigBuffer(nPoints*sGout);
+            } else {
+                outBuff = new Uint8Array(nPoints*sGout);
+            }
+
+            let p=0;
+            for (let i=0; i<result.length; i++) {
+                outBuff.set(result[i][0], p);
+                p += result[i][0].byteLength;
+            }
+
+            return outBuff;
+        };
+    }
+
+    function buildPairing(curve) {
+        const tm = curve.tm;
+        curve.pairing = function pairing(a, b) {
+
+            tm.startSyncOp();
+            const pA = tm.allocBuff(curve.G1.toJacobian(a));
+            const pB = tm.allocBuff(curve.G2.toJacobian(b));
+            const pRes = tm.alloc(curve.Gt.n8);
+            tm.instance.exports[curve.name + "_pairing"](pA, pB, pRes);
+
+            const res = tm.getBuff(pRes, curve.Gt.n8);
+
+            tm.endSyncOp();
+            return res;
+        };
+
+        curve.pairingEq = async function pairingEq() {
+            let  buffCt;
+            let nEqs;
+            if ((arguments.length % 2) == 1) {
+                buffCt = arguments[arguments.length-1];
+                nEqs = (arguments.length -1) /2;
+            } else {
+                buffCt = curve.Gt.one;
+                nEqs = arguments.length /2;
+            }
+
+            const opPromises = [];
+            for (let i=0; i<nEqs; i++) {
+
+                const task = [];
+
+                const g1Buff = curve.G1.toJacobian(arguments[i*2]);
+                task.push({cmd: "ALLOCSET", var: 0, buff: g1Buff});
+                task.push({cmd: "ALLOC", var: 1, len: curve.prePSize});
+
+                const g2Buff = curve.G2.toJacobian(arguments[i*2 +1]);
+                task.push({cmd: "ALLOCSET", var: 2, buff: g2Buff});
+                task.push({cmd: "ALLOC", var: 3, len: curve.preQSize});
+
+                task.push({cmd: "ALLOC", var: 4, len: curve.Gt.n8});
+
+                task.push({cmd: "CALL", fnName: curve.name + "_prepareG1", params: [
+                    {var: 0},
+                    {var: 1}
+                ]});
+
+                task.push({cmd: "CALL", fnName: curve.name + "_prepareG2", params: [
+                    {var: 2},
+                    {var: 3}
+                ]});
+
+                task.push({cmd: "CALL", fnName: curve.name + "_millerLoop", params: [
+                    {var: 1},
+                    {var: 3},
+                    {var: 4}
+                ]});
+
+                task.push({cmd: "GET", out: 0, var: 4, len: curve.Gt.n8});
+
+                opPromises.push(
+                    tm.queueAction(task)
+                );
+            }
+
+
+            const result = await Promise.all(opPromises);
+
+            tm.startSyncOp();
+            const pRes = tm.alloc(curve.Gt.n8);
+            tm.instance.exports.ftm_one(pRes);
+
+            for (let i=0; i<result.length; i++) {
+                const pMR = tm.allocBuff(result[i][0]);
+                tm.instance.exports.ftm_mul(pRes, pMR, pRes);
+            }
+            tm.instance.exports[curve.name + "_finalExponentiation"](pRes, pRes);
+
+            const pCt = tm.allocBuff(buffCt);
+
+            const r = !!tm.instance.exports.ftm_eq(pRes, pCt);
+
+            tm.endSyncOp();
+
+            return r;
+        };
+
+        curve.prepareG1 = function(p) {
+            this.tm.startSyncOp();
+            const pP = this.tm.allocBuff(p);
+            const pPrepP = this.tm.alloc(this.prePSize);
+            this.tm.instance.exports[this.name + "_prepareG1"](pP, pPrepP);
+            const res = this.tm.getBuff(pPrepP, this.prePSize);
+            this.tm.endSyncOp();
+            return res;
+        };
+
+        curve.prepareG2 = function(q) {
+            this.tm.startSyncOp();
+            const pQ = this.tm.allocBuff(q);
+            const pPrepQ = this.tm.alloc(this.preQSize);
+            this.tm.instance.exports[this.name + "_prepareG2"](pQ, pPrepQ);
+            const res = this.tm.getBuff(pPrepQ, this.preQSize);
+            this.tm.endSyncOp();
+            return res;
+        };
+
+        curve.millerLoop = function(preP, preQ) {
+            this.tm.startSyncOp();
+            const pPreP = this.tm.allocBuff(preP);
+            const pPreQ = this.tm.allocBuff(preQ);
+            const pRes = this.tm.alloc(this.Gt.n8);
+            this.tm.instance.exports[this.name + "_millerLoop"](pPreP, pPreQ, pRes);
+            const res = this.tm.getBuff(pRes, this.Gt.n8);
+            this.tm.endSyncOp();
+            return res;
+        };
+
+        curve.finalExponentiation = function(a) {
+            this.tm.startSyncOp();
+            const pA = this.tm.allocBuff(a);
+            const pRes = this.tm.alloc(this.Gt.n8);
+            this.tm.instance.exports[this.name + "_finalExponentiation"](pA, pRes);
+            const res = this.tm.getBuff(pRes, this.Gt.n8);
+            this.tm.endSyncOp();
+            return res;
+        };
+
+    }
+
+    const pTSizes = [
+        1 ,  1,  1,  1,    2,  3,  4,  5,
+        6 ,  7,  7,  8,    9, 10, 11, 12,
+        13, 13, 14, 15,   16, 16, 17, 17,
+        17, 17, 17, 17,   17, 17, 17, 17
+    ];
+
+    function buildMultiexp(curve, groupName) {
+        const G = curve[groupName];
+        const tm = G.tm;
+        async function _multiExpChunk(buffBases, buffScalars, inType, logger, logText) {
+            if ( ! (buffBases instanceof Uint8Array) ) {
+                if (logger) logger.error(`${logText} _multiExpChunk buffBases is not Uint8Array`);
+                throw new Error(`${logText} _multiExpChunk buffBases is not Uint8Array`);
+            }
+            if ( ! (buffScalars instanceof Uint8Array) ) {
+                if (logger) logger.error(`${logText} _multiExpChunk buffScalars is not Uint8Array`);
+                throw new Error(`${logText} _multiExpChunk buffScalars is not Uint8Array`);
+            }
+            inType = inType || "affine";
+
+            let sGIn;
+            let fnName;
+            if (groupName == "G1") {
+                if (inType == "affine") {
+                    fnName = "g1m_multiexpAffine_chunk";
+                    sGIn = G.F.n8*2;
+                } else {
+                    fnName = "g1m_multiexp_chunk";
+                    sGIn = G.F.n8*3;
+                }
+            } else if (groupName == "G2") {
+                if (inType == "affine") {
+                    fnName = "g2m_multiexpAffine_chunk";
+                    sGIn = G.F.n8*2;
+                } else {
+                    fnName = "g2m_multiexp_chunk";
+                    sGIn = G.F.n8*3;
+                }
+            } else {
+                throw new Error("Invalid group");
+            }
+            const nPoints = Math.floor(buffBases.byteLength / sGIn);
+
+            if (nPoints == 0) return G.zero;
+            const sScalar = Math.floor(buffScalars.byteLength / nPoints);
+            if( sScalar * nPoints != buffScalars.byteLength) {
+                throw new Error("Scalar size does not match");
+            }
+
+            const bitChunkSize = pTSizes[log2$1(nPoints)];
+            const nChunks = Math.floor((sScalar*8 - 1) / bitChunkSize) +1;
+
+            const opPromises = [];
+            for (let i=0; i<nChunks; i++) {
+                const task = [
+                    {cmd: "ALLOCSET", var: 0, buff: buffBases},
+                    {cmd: "ALLOCSET", var: 1, buff: buffScalars},
+                    {cmd: "ALLOC", var: 2, len: G.F.n8*3},
+                    {cmd: "CALL", fnName: fnName, params: [
+                        {var: 0},
+                        {var: 1},
+                        {val: sScalar},
+                        {val: nPoints},
+                        {val: i*bitChunkSize},
+                        {val: Math.min(sScalar*8 - i*bitChunkSize, bitChunkSize)},
+                        {var: 2}
+                    ]},
+                    {cmd: "GET", out: 0, var: 2, len: G.F.n8*3}
+                ];
+                opPromises.push(
+                    G.tm.queueAction(task)
+                );
+            }
+
+            const result = await Promise.all(opPromises);
+
+            let res = G.zero;
+            for (let i=result.length-1; i>=0; i--) {
+                if (!G.isZero(res)) {
+                    for (let j=0; j<bitChunkSize; j++) res = G.double(res);
+                }
+                res = G.add(res, result[i][0]);
+            }
+
+            return res;
+        }
+
+        async function _multiExp(buffBases, buffScalars, inType, logger, logText) {
+            const MAX_CHUNK_SIZE = 1 << 22;
+            const MIN_CHUNK_SIZE = 1 << 10;
+            let sGIn;
+
+            if (groupName == "G1") {
+                if (inType == "affine") {
+                    sGIn = G.F.n8*2;
+                } else {
+                    sGIn = G.F.n8*3;
+                }
+            } else if (groupName == "G2") {
+                if (inType == "affine") {
+                    sGIn = G.F.n8*2;
+                } else {
+                    sGIn = G.F.n8*3;
+                }
+            } else {
+                throw new Error("Invalid group");
+            }
+
+            const nPoints = Math.floor(buffBases.byteLength / sGIn);
+            const sScalar = Math.floor(buffScalars.byteLength / nPoints);
+            if( sScalar * nPoints != buffScalars.byteLength) {
+                throw new Error("Scalar size does not match");
+            }
+
+            const bitChunkSize = pTSizes[log2$1(nPoints)];
+            const nChunks = Math.floor((sScalar*8 - 1) / bitChunkSize) +1;
+
+            let chunkSize;
+            chunkSize = Math.floor(nPoints / (tm.concurrency /nChunks));
+            if (chunkSize>MAX_CHUNK_SIZE) chunkSize = MAX_CHUNK_SIZE;
+            if (chunkSize<MIN_CHUNK_SIZE) chunkSize = MIN_CHUNK_SIZE;
+
+            const opPromises = [];
+            for (let i=0; i<nPoints; i += chunkSize) {
+                if (logger) logger.debug(`Multiexp start: ${logText}: ${i}/${nPoints}`);
+                const n= Math.min(nPoints - i, chunkSize);
+                const buffBasesChunk = buffBases.slice(i*sGIn, (i+n)*sGIn);
+                const buffScalarsChunk = buffScalars.slice(i*sScalar, (i+n)*sScalar);
+                opPromises.push(_multiExpChunk(buffBasesChunk, buffScalarsChunk, inType, logger, logText).then( (r) => {
+                    if (logger) logger.debug(`Multiexp end: ${logText}: ${i}/${nPoints}`);
+                    return r;
+                }));
+            }
+
+            const result = await Promise.all(opPromises);
+
+            let res = G.zero;
+            for (let i=result.length-1; i>=0; i--) {
+                res = G.add(res, result[i]);
+            }
+
+            return res;
+        }
+
+        G.multiExp = async function multiExpAffine(buffBases, buffScalars, logger, logText) {
+            return await _multiExp(buffBases, buffScalars, "jacobian", logger, logText);
+        };
+        G.multiExpAffine = async function multiExpAffine(buffBases, buffScalars, logger, logText) {
+            return await _multiExp(buffBases, buffScalars, "affine", logger, logText);
+        };
+    }
+
+    function buildFFT(curve, groupName) {
+        const G = curve[groupName];
+        const Fr = curve.Fr;
+        const tm = G.tm;
+        async function _fft(buff, inverse, inType, outType, logger, loggerTxt) {
+
+            inType = inType || "affine";
+            outType = outType || "affine";
+            const MAX_BITS_THREAD = 14;
+
+            let sIn, sMid, sOut, fnIn2Mid, fnMid2Out, fnFFTMix, fnFFTJoin, fnFFTFinal;
+            if (groupName == "G1") {
+                if (inType == "affine") {
+                    sIn = G.F.n8*2;
+                    fnIn2Mid = "g1m_batchToJacobian";
+                } else {
+                    sIn = G.F.n8*3;
+                }
+                sMid = G.F.n8*3;
+                if (inverse) {
+                    fnFFTFinal = "g1m_fftFinal";
+                }
+                fnFFTJoin = "g1m_fftJoin";
+                fnFFTMix = "g1m_fftMix";
+
+                if (outType == "affine") {
+                    sOut = G.F.n8*2;
+                    fnMid2Out = "g1m_batchToAffine";
+                } else {
+                    sOut = G.F.n8*3;
+                }
+
+            } else if (groupName == "G2") {
+                if (inType == "affine") {
+                    sIn = G.F.n8*2;
+                    fnIn2Mid = "g2m_batchToJacobian";
+                } else {
+                    sIn = G.F.n8*3;
+                }
+                sMid = G.F.n8*3;
+                if (inverse) {
+                    fnFFTFinal = "g2m_fftFinal";
+                }
+                fnFFTJoin = "g2m_fftJoin";
+                fnFFTMix = "g2m_fftMix";
+                if (outType == "affine") {
+                    sOut = G.F.n8*2;
+                    fnMid2Out = "g2m_batchToAffine";
+                } else {
+                    sOut = G.F.n8*3;
+                }
+            } else if (groupName == "Fr") {
+                sIn = G.n8;
+                sMid = G.n8;
+                sOut = G.n8;
+                if (inverse) {
+                    fnFFTFinal = "frm_fftFinal";
+                }
+                fnFFTMix = "frm_fftMix";
+                fnFFTJoin = "frm_fftJoin";
+            }
+
+
+            let returnArray = false;
+            if (Array.isArray(buff)) {
+                buff = array2buffer(buff, sIn);
+                returnArray = true;
+            } else {
+                buff = buff.slice(0, buff.byteLength);
+            }
+
+            const nPoints = buff.byteLength / sIn;
+            const bits = log2$1(nPoints);
+
+            if  ((1 << bits) != nPoints) {
+                throw new Error("fft must be multiple of 2" );
+            }
+
+            if (bits == Fr.s +1) {
+                let buffOut;
+
+                if (inverse) {
+                    buffOut =  await _fftExtInv(buff, inType, outType, logger, loggerTxt);
+                } else {
+                    buffOut =  await _fftExt(buff, inType, outType, logger, loggerTxt);
+                }
+
+                if (returnArray) {
+                    return buffer2array(buffOut, sOut);
+                } else {
+                    return buffOut;
+                }
+            }
+
+            let inv;
+            if (inverse) {
+                inv = Fr.inv(Fr.e(nPoints));
+            }
+
+            let buffOut;
+
+            buffReverseBits(buff, sIn);
+
+            let chunks;
+            let pointsInChunk = Math.min(1 << MAX_BITS_THREAD, nPoints);
+            let nChunks = nPoints / pointsInChunk;
+
+            while ((nChunks < tm.concurrency)&&(pointsInChunk>=16)) {
+                nChunks *= 2;
+                pointsInChunk /= 2;
+            }
+
+            const l2Chunk = log2$1(pointsInChunk);
+
+            const promises = [];
+            for (let i = 0; i< nChunks; i++) {
+                if (logger) logger.debug(`${loggerTxt}: fft ${bits} mix start: ${i}/${nChunks}`);
+                const task = [];
+                task.push({cmd: "ALLOC", var: 0, len: sMid*pointsInChunk});
+                const buffChunk = buff.slice( (pointsInChunk * i)*sIn, (pointsInChunk * (i+1))*sIn);
+                task.push({cmd: "SET", var: 0, buff: buffChunk});
+                if (fnIn2Mid) {
+                    task.push({cmd: "CALL", fnName:fnIn2Mid, params: [{var:0}, {val: pointsInChunk}, {var: 0}]});
+                }
+                for (let j=1; j<=l2Chunk;j++) {
+                    task.push({cmd: "CALL", fnName:fnFFTMix, params: [{var:0}, {val: pointsInChunk}, {val: j}]});
+                }
+
+                if (l2Chunk==bits) {
+                    if (fnFFTFinal) {
+                        task.push({cmd: "ALLOCSET", var: 1, buff: inv});
+                        task.push({cmd: "CALL", fnName: fnFFTFinal,  params:[
+                            {var: 0},
+                            {val: pointsInChunk},
+                            {var: 1},
+                        ]});
+                    }
+                    if (fnMid2Out) {
+                        task.push({cmd: "CALL", fnName:fnMid2Out, params: [{var:0}, {val: pointsInChunk}, {var: 0}]});
+                    }
+                    task.push({cmd: "GET", out: 0, var: 0, len: pointsInChunk*sOut});
+                } else {
+                    task.push({cmd: "GET", out:0, var: 0, len: sMid*pointsInChunk});
+                }
+                promises.push(tm.queueAction(task).then( (r) => {
+                    if (logger) logger.debug(`${loggerTxt}: fft ${bits} mix end: ${i}/${nChunks}`);
+                    return r;
+                }));
+            }
+
+            chunks = await Promise.all(promises);
+            for (let i = 0; i< nChunks; i++) chunks[i] = chunks[i][0];
+
+            for (let i = l2Chunk+1;   i<=bits; i++) {
+                if (logger) logger.debug(`${loggerTxt}: fft  ${bits}  join: ${i}/${bits}`);
+                const nGroups = 1 << (bits - i);
+                const nChunksPerGroup = nChunks / nGroups;
+                const opPromises = [];
+                for (let j=0; j<nGroups; j++) {
+                    for (let k=0; k <nChunksPerGroup/2; k++) {
+                        const first = Fr.exp( Fr.w[i], k*pointsInChunk);
+                        const inc = Fr.w[i];
+                        const o1 = j*nChunksPerGroup + k;
+                        const o2 = j*nChunksPerGroup + k + nChunksPerGroup/2;
+
+                        const task = [];
+                        task.push({cmd: "ALLOCSET", var: 0, buff: chunks[o1]});
+                        task.push({cmd: "ALLOCSET", var: 1, buff: chunks[o2]});
+                        task.push({cmd: "ALLOCSET", var: 2, buff: first});
+                        task.push({cmd: "ALLOCSET", var: 3, buff: inc});
+                        task.push({cmd: "CALL", fnName: fnFFTJoin,  params:[
+                            {var: 0},
+                            {var: 1},
+                            {val: pointsInChunk},
+                            {var: 2},
+                            {var: 3}
+                        ]});
+                        if (i==bits) {
+                            if (fnFFTFinal) {
+                                task.push({cmd: "ALLOCSET", var: 4, buff: inv});
+                                task.push({cmd: "CALL", fnName: fnFFTFinal,  params:[
+                                    {var: 0},
+                                    {val: pointsInChunk},
+                                    {var: 4},
+                                ]});
+                                task.push({cmd: "CALL", fnName: fnFFTFinal,  params:[
+                                    {var: 1},
+                                    {val: pointsInChunk},
+                                    {var: 4},
+                                ]});
+                            }
+                            if (fnMid2Out) {
+                                task.push({cmd: "CALL", fnName:fnMid2Out, params: [{var:0}, {val: pointsInChunk}, {var: 0}]});
+                                task.push({cmd: "CALL", fnName:fnMid2Out, params: [{var:1}, {val: pointsInChunk}, {var: 1}]});
+                            }
+                            task.push({cmd: "GET", out: 0, var: 0, len: pointsInChunk*sOut});
+                            task.push({cmd: "GET", out: 1, var: 1, len: pointsInChunk*sOut});
+                        } else {
+                            task.push({cmd: "GET", out: 0, var: 0, len: pointsInChunk*sMid});
+                            task.push({cmd: "GET", out: 1, var: 1, len: pointsInChunk*sMid});
+                        }
+                        opPromises.push(tm.queueAction(task).then( (r) => {
+                            if (logger) logger.debug(`${loggerTxt}: fft ${bits} join  ${i}/${bits}  ${j+1}/${nGroups} ${k}/${nChunksPerGroup/2}`);
+                            return r;
+                        }));
+                    }
+                }
+
+                const res = await Promise.all(opPromises);
+                for (let j=0; j<nGroups; j++) {
+                    for (let k=0; k <nChunksPerGroup/2; k++) {
+                        const o1 = j*nChunksPerGroup + k;
+                        const o2 = j*nChunksPerGroup + k + nChunksPerGroup/2;
+                        const resChunk = res.shift();
+                        chunks[o1] = resChunk[0];
+                        chunks[o2] = resChunk[1];
+                    }
+                }
+            }
+
+            if (buff instanceof BigBuffer) {
+                buffOut = new BigBuffer(nPoints*sOut);
+            } else {
+                buffOut = new Uint8Array(nPoints*sOut);
+            }
+            if (inverse) {
+                buffOut.set(chunks[0].slice((pointsInChunk-1)*sOut));
+                let p= sOut;
+                for (let i=nChunks-1; i>0; i--) {
+                    buffOut.set(chunks[i], p);
+                    p += pointsInChunk*sOut;
+                    delete chunks[i];  // Liberate mem
+                }
+                buffOut.set(chunks[0].slice(0, (pointsInChunk-1)*sOut), p);
+                delete chunks[0];
+            } else {
+                for (let i=0; i<nChunks; i++) {
+                    buffOut.set(chunks[i], pointsInChunk*sOut*i);
+                    delete chunks[i];
+                }
+            }
+
+            if (returnArray) {
+                return buffer2array(buffOut, sOut);
+            } else {
+                return buffOut;
+            }
+        }
+
+        async function _fftExt(buff, inType, outType, logger, loggerTxt) {
+            let b1, b2;
+            b1 = buff.slice( 0 , buff.byteLength/2);
+            b2 = buff.slice( buff.byteLength/2, buff.byteLength);
+
+            const promises = [];
+
+            [b1, b2] = await _fftJoinExt(b1, b2, "fftJoinExt", Fr.one, Fr.shift, inType, "jacobian", logger, loggerTxt);
+
+            promises.push( _fft(b1, false, "jacobian", outType, logger, loggerTxt));
+            promises.push( _fft(b2, false, "jacobian", outType, logger, loggerTxt));
+
+            const res1 = await Promise.all(promises);
+
+            let buffOut;
+            if (res1[0].byteLength > (1<<28)) {
+                buffOut = new BigBuffer(res1[0].byteLength*2);
+            } else {
+                buffOut = new Uint8Array(res1[0].byteLength*2);
+            }
+
+            buffOut.set(res1[0]);
+            buffOut.set(res1[1], res1[0].byteLength);
+
+            return buffOut;
+        }
+
+        async function _fftExtInv(buff, inType, outType, logger, loggerTxt) {
+            let b1, b2;
+            b1 = buff.slice( 0 , buff.byteLength/2);
+            b2 = buff.slice( buff.byteLength/2, buff.byteLength);
+
+            const promises = [];
+
+            promises.push( _fft(b1, true, inType, "jacobian", logger, loggerTxt));
+            promises.push( _fft(b2, true, inType, "jacobian", logger, loggerTxt));
+
+            [b1, b2] = await Promise.all(promises);
+
+            const res1 = await _fftJoinExt(b1, b2, "fftJoinExtInv", Fr.one, Fr.shiftInv, "jacobian", outType, logger, loggerTxt);
+
+            let buffOut;
+            if (res1[0].byteLength > (1<<28)) {
+                buffOut = new BigBuffer(res1[0].byteLength*2);
+            } else {
+                buffOut = new Uint8Array(res1[0].byteLength*2);
+            }
+
+            buffOut.set(res1[0]);
+            buffOut.set(res1[1], res1[0].byteLength);
+
+            return buffOut;
+        }
+
+
+        async function _fftJoinExt(buff1, buff2, fn, first, inc, inType, outType, logger, loggerTxt) {
+            const MAX_CHUNK_SIZE = 1<<16;
+            const MIN_CHUNK_SIZE = 1<<4;
+
+            let fnName;
+            let fnIn2Mid, fnMid2Out;
+            let sOut, sIn, sMid;
+
+            if (groupName == "G1") {
+                if (inType == "affine") {
+                    sIn = G.F.n8*2;
+                    fnIn2Mid = "g1m_batchToJacobian";
+                } else {
+                    sIn = G.F.n8*3;
+                }
+                sMid = G.F.n8*3;
+                fnName = "g1m_"+fn;
+                if (outType == "affine") {
+                    fnMid2Out = "g1m_batchToAffine";
+                    sOut = G.F.n8*2;
+                } else {
+                    sOut = G.F.n8*3;
+                }
+            } else if (groupName == "G2") {
+                if (inType == "affine") {
+                    sIn = G.F.n8*2;
+                    fnIn2Mid = "g2m_batchToJacobian";
+                } else {
+                    sIn = G.F.n8*3;
+                }
+                fnName = "g2m_"+fn;
+                sMid = G.F.n8*3;
+                if (outType == "affine") {
+                    fnMid2Out = "g2m_batchToAffine";
+                    sOut = G.F.n8*2;
+                } else {
+                    sOut = G.F.n8*3;
+                }
+            } else if (groupName == "Fr") {
+                sIn = Fr.n8;
+                sOut = Fr.n8;
+                sMid = Fr.n8;
+                fnName = "frm_" + fn;
+            } else {
+                throw new Error("Invalid group");
+            }
+
+            if (buff1.byteLength != buff2.byteLength) {
+                throw new Error("Invalid buffer size");
+            }
+            const nPoints = Math.floor(buff1.byteLength / sIn);
+            if (nPoints != 1 << log2$1(nPoints)) {
+                throw new Error("Invalid number of points");
+            }
+
+            let chunkSize = Math.floor(nPoints /tm.concurrency);
+            if (chunkSize < MIN_CHUNK_SIZE) chunkSize = MIN_CHUNK_SIZE;
+            if (chunkSize > MAX_CHUNK_SIZE) chunkSize = MAX_CHUNK_SIZE;
+
+            const opPromises = [];
+
+            for (let i=0; i<nPoints; i += chunkSize) {
+                if (logger) logger.debug(`${loggerTxt}: fftJoinExt Start: ${i}/${nPoints}`);
+                const n= Math.min(nPoints - i, chunkSize);
+
+                const firstChunk = Fr.mul(first, Fr.exp( inc, i));
+                const task = [];
+
+                const b1 = buff1.slice(i*sIn, (i+n)*sIn);
+                const b2 = buff2.slice(i*sIn, (i+n)*sIn);
+
+                task.push({cmd: "ALLOC", var: 0, len: sMid*n});
+                task.push({cmd: "SET", var: 0, buff: b1});
+                task.push({cmd: "ALLOC", var: 1, len: sMid*n});
+                task.push({cmd: "SET", var: 1, buff: b2});
+                task.push({cmd: "ALLOCSET", var: 2, buff: firstChunk});
+                task.push({cmd: "ALLOCSET", var: 3, buff: inc});
+                if (fnIn2Mid) {
+                    task.push({cmd: "CALL", fnName:fnIn2Mid, params: [{var:0}, {val: n}, {var: 0}]});
+                    task.push({cmd: "CALL", fnName:fnIn2Mid, params: [{var:1}, {val: n}, {var: 1}]});
+                }
+                task.push({cmd: "CALL", fnName: fnName, params: [
+                    {var: 0},
+                    {var: 1},
+                    {val: n},
+                    {var: 2},
+                    {var: 3},
+                    {val: Fr.s},
+                ]});
+                if (fnMid2Out) {
+                    task.push({cmd: "CALL", fnName:fnMid2Out, params: [{var:0}, {val: n}, {var: 0}]});
+                    task.push({cmd: "CALL", fnName:fnMid2Out, params: [{var:1}, {val: n}, {var: 1}]});
+                }
+                task.push({cmd: "GET", out: 0, var: 0, len: n*sOut});
+                task.push({cmd: "GET", out: 1, var: 1, len: n*sOut});
+                opPromises.push(
+                    tm.queueAction(task).then( (r) => {
+                        if (logger) logger.debug(`${loggerTxt}: fftJoinExt End: ${i}/${nPoints}`);
+                        return r;
+                    })
+                );
+            }
+
+            const result = await Promise.all(opPromises);
+
+            let fullBuffOut1;
+            let fullBuffOut2;
+            if (nPoints * sOut > 1<<28) {
+                fullBuffOut1 = new BigBuffer(nPoints*sOut);
+                fullBuffOut2 = new BigBuffer(nPoints*sOut);
+            } else {
+                fullBuffOut1 = new Uint8Array(nPoints*sOut);
+                fullBuffOut2 = new Uint8Array(nPoints*sOut);
+            }
+
+            let p =0;
+            for (let i=0; i<result.length; i++) {
+                fullBuffOut1.set(result[i][0], p);
+                fullBuffOut2.set(result[i][1], p);
+                p+=result[i][0].byteLength;
+            }
+
+            return [fullBuffOut1, fullBuffOut2];
+        }
+
+
+        G.fft = async function(buff, inType, outType, logger, loggerTxt) {
+            return await _fft(buff, false, inType, outType, logger, loggerTxt);
+        };
+
+        G.ifft = async function(buff, inType, outType, logger, loggerTxt) {
+            return await _fft(buff, true, inType, outType, logger, loggerTxt);
+        };
+
+        G.lagrangeEvaluations = async function (buff, inType, outType, logger, loggerTxt) {
+            inType = inType || "affine";
+            outType = outType || "affine";
+
+            let sIn;
+            if (groupName == "G1") {
+                if (inType == "affine") {
+                    sIn = G.F.n8*2;
+                } else {
+                    sIn = G.F.n8*3;
+                }
+            } else if (groupName == "G2") {
+                if (inType == "affine") {
+                    sIn = G.F.n8*2;
+                } else {
+                    sIn = G.F.n8*3;
+                }
+            } else if (groupName == "Fr") {
+                sIn = Fr.n8;
+            } else {
+                throw new Error("Invalid group");
+            }
+
+            const nPoints = buff.byteLength /sIn;
+            const bits = log2$1(nPoints);
+
+            if ((2 ** bits)*sIn != buff.byteLength) {
+                if (logger) logger.error("lagrangeEvaluations iinvalid input size");
+                throw new Error("lagrangeEvaluations invalid Input size");
+            }
+
+            if (bits <= Fr.s) {
+                return await G.ifft(buff, inType, outType, logger, loggerTxt);
+            }
+
+            if (bits > Fr.s+1) {
+                if (logger) logger.error("lagrangeEvaluations input too big");
+                throw new Error("lagrangeEvaluations input too big");
+            }
+
+            let t0 = buff.slice(0, buff.byteLength/2);
+            let t1 = buff.slice(buff.byteLength/2, buff.byteLength);
+
+
+            const shiftToSmallM = Fr.exp(Fr.shift, nPoints/2);
+            const sConst = Fr.inv( Fr.sub(Fr.one, shiftToSmallM));
+
+            [t0, t1] = await _fftJoinExt(t0, t1, "prepareLagrangeEvaluation", sConst, Fr.shiftInv, inType, "jacobian", logger, loggerTxt + " prep");
+
+            const promises = [];
+
+            promises.push( _fft(t0, true, "jacobian", outType, logger, loggerTxt + " t0"));
+            promises.push( _fft(t1, true, "jacobian", outType, logger, loggerTxt + " t1"));
+
+            [t0, t1] = await Promise.all(promises);
+
+            let buffOut;
+            if (t0.byteLength > (1<<28)) {
+                buffOut = new BigBuffer(t0.byteLength*2);
+            } else {
+                buffOut = new Uint8Array(t0.byteLength*2);
+            }
+
+            buffOut.set(t0);
+            buffOut.set(t1, t0.byteLength);
+
+            return buffOut;
+        };
+
+        G.fftMix = async function fftMix(buff) {
+            const sG = G.F.n8*3;
+            let fnName, fnFFTJoin;
+            if (groupName == "G1") {
+                fnName = "g1m_fftMix";
+                fnFFTJoin = "g1m_fftJoin";
+            } else if (groupName == "G2") {
+                fnName = "g2m_fftMix";
+                fnFFTJoin = "g2m_fftJoin";
+            } else if (groupName == "Fr") {
+                fnName = "frm_fftMix";
+                fnFFTJoin = "frm_fftJoin";
+            } else {
+                throw new Error("Invalid group");
+            }
+
+            const nPoints = Math.floor(buff.byteLength / sG);
+            const power = log2$1(nPoints);
+
+            let nChunks = 1 << log2$1(tm.concurrency);
+
+            if (nPoints <= nChunks*2) nChunks = 1;
+
+            const pointsPerChunk = nPoints / nChunks;
+
+            const powerChunk = log2$1(pointsPerChunk);
+
+            const opPromises = [];
+            for (let i=0; i<nChunks; i++) {
+                const task = [];
+                const b = buff.slice((i* pointsPerChunk)*sG, ((i+1)* pointsPerChunk)*sG);
+                task.push({cmd: "ALLOCSET", var: 0, buff: b});
+                for (let j=1; j<=powerChunk; j++) {
+                    task.push({cmd: "CALL", fnName: fnName, params: [
+                        {var: 0},
+                        {val: pointsPerChunk},
+                        {val: j}
+                    ]});
+                }
+                task.push({cmd: "GET", out: 0, var: 0, len: pointsPerChunk*sG});
+                opPromises.push(
+                    tm.queueAction(task)
+                );
+            }
+
+            const result = await Promise.all(opPromises);
+
+            const chunks = [];
+            for (let i=0; i<result.length; i++) chunks[i] = result[i][0];
+
+
+            for (let i = powerChunk+1; i<=power; i++) {
+                const nGroups = 1 << (power - i);
+                const nChunksPerGroup = nChunks / nGroups;
+                const opPromises = [];
+                for (let j=0; j<nGroups; j++) {
+                    for (let k=0; k <nChunksPerGroup/2; k++) {
+                        const first = Fr.exp( Fr.w[i], k*pointsPerChunk);
+                        const inc = Fr.w[i];
+                        const o1 = j*nChunksPerGroup + k;
+                        const o2 = j*nChunksPerGroup + k + nChunksPerGroup/2;
+
+                        const task = [];
+                        task.push({cmd: "ALLOCSET", var: 0, buff: chunks[o1]});
+                        task.push({cmd: "ALLOCSET", var: 1, buff: chunks[o2]});
+                        task.push({cmd: "ALLOCSET", var: 2, buff: first});
+                        task.push({cmd: "ALLOCSET", var: 3, buff: inc});
+                        task.push({cmd: "CALL", fnName: fnFFTJoin,  params:[
+                            {var: 0},
+                            {var: 1},
+                            {val: pointsPerChunk},
+                            {var: 2},
+                            {var: 3}
+                        ]});
+                        task.push({cmd: "GET", out: 0, var: 0, len: pointsPerChunk*sG});
+                        task.push({cmd: "GET", out: 1, var: 1, len: pointsPerChunk*sG});
+                        opPromises.push(tm.queueAction(task));
+                    }
+                }
+
+                const res = await Promise.all(opPromises);
+                for (let j=0; j<nGroups; j++) {
+                    for (let k=0; k <nChunksPerGroup/2; k++) {
+                        const o1 = j*nChunksPerGroup + k;
+                        const o2 = j*nChunksPerGroup + k + nChunksPerGroup/2;
+                        const resChunk = res.shift();
+                        chunks[o1] = resChunk[0];
+                        chunks[o2] = resChunk[1];
+                    }
+                }
+            }
+
+            let fullBuffOut;
+            if (buff instanceof BigBuffer) {
+                fullBuffOut = new BigBuffer(nPoints*sG);
+            } else {
+                fullBuffOut = new Uint8Array(nPoints*sG);
+            }
+            let p =0;
+            for (let i=0; i<nChunks; i++) {
+                fullBuffOut.set(chunks[i], p);
+                p+=chunks[i].byteLength;
+            }
+
+            return fullBuffOut;
+        };
+
+        G.fftJoin = async function fftJoin(buff1, buff2, first, inc) {
+            const sG = G.F.n8*3;
+            let fnName;
+            if (groupName == "G1") {
+                fnName = "g1m_fftJoin";
+            } else if (groupName == "G2") {
+                fnName = "g2m_fftJoin";
+            } else if (groupName == "Fr") {
+                fnName = "frm_fftJoin";
+            } else {
+                throw new Error("Invalid group");
+            }
+
+            if (buff1.byteLength != buff2.byteLength) {
+                throw new Error("Invalid buffer size");
+            }
+            const nPoints = Math.floor(buff1.byteLength / sG);
+            if (nPoints != 1 << log2$1(nPoints)) {
+                throw new Error("Invalid number of points");
+            }
+
+            let nChunks = 1 << log2$1(tm.concurrency);
+            if (nPoints <= nChunks*2) nChunks = 1;
+
+            const pointsPerChunk = nPoints / nChunks;
+
+
+            const opPromises = [];
+            for (let i=0; i<nChunks; i++) {
+                const task = [];
+
+                const firstChunk = Fr.mul(first, Fr.exp(inc, i*pointsPerChunk));
+                const b1 = buff1.slice((i* pointsPerChunk)*sG, ((i+1)* pointsPerChunk)*sG);
+                const b2 = buff2.slice((i* pointsPerChunk)*sG, ((i+1)* pointsPerChunk)*sG);
+                task.push({cmd: "ALLOCSET", var: 0, buff: b1});
+                task.push({cmd: "ALLOCSET", var: 1, buff: b2});
+                task.push({cmd: "ALLOCSET", var: 2, buff: firstChunk});
+                task.push({cmd: "ALLOCSET", var: 3, buff: inc});
+                task.push({cmd: "CALL", fnName: fnName, params: [
+                    {var: 0},
+                    {var: 1},
+                    {val: pointsPerChunk},
+                    {var: 2},
+                    {var: 3}
+                ]});
+                task.push({cmd: "GET", out: 0, var: 0, len: pointsPerChunk*sG});
+                task.push({cmd: "GET", out: 1, var: 1, len: pointsPerChunk*sG});
+                opPromises.push(
+                    tm.queueAction(task)
+                );
+
+            }
+
+
+            const result = await Promise.all(opPromises);
+
+            let fullBuffOut1;
+            let fullBuffOut2;
+            if (buff1 instanceof BigBuffer) {
+                fullBuffOut1 = new BigBuffer(nPoints*sG);
+                fullBuffOut2 = new BigBuffer(nPoints*sG);
+            } else {
+                fullBuffOut1 = new Uint8Array(nPoints*sG);
+                fullBuffOut2 = new Uint8Array(nPoints*sG);
+            }

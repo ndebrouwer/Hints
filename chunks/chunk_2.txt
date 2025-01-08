@@ -1,0 +1,2500 @@
+
+
+    // Assert `emailHeaderLength` fits in `ceil(log2(maxHeadersLength))`
+    component n2bHeaderLength = Num2Bits(log2Ceil(maxHeadersLength));
+    n2bHeaderLength.in <== emailHeaderLength;
+
+
+    // Assert `emailHeader` data after `emailHeaderLength` are zeros
+    AssertZeroPadding(maxHeadersLength)(emailHeader, emailHeaderLength);
+    
+
+    // Calculate SHA256 hash of the `emailHeader` - 506,670 constraints
+    signal output sha[256] <== Sha256Bytes(maxHeadersLength)(emailHeader, emailHeaderLength);
+
+
+    // Pack SHA output bytes to int[] for RSA input message
+    var rsaMessageSize = (256 + n) \ n;
+    component rsaMessage[rsaMessageSize];
+    for (var i = 0; i < rsaMessageSize; i++) {
+        rsaMessage[i] = Bits2Num(n);
+    }
+    for (var i = 0; i < 256; i++) {
+        rsaMessage[i \ n].in[i % n] <== sha[255 - i];
+    }
+    for (var i = 256; i < n * rsaMessageSize; i++) {
+        rsaMessage[i \ n].in[i % n] <== 0;
+    }
+
+    // Verify RSA signature - 149,251 constraints
+    component rsaVerifier = RSAVerifier65537(n, k);
+    for (var i = 0; i < rsaMessageSize; i++) {
+        rsaVerifier.message[i] <== rsaMessage[i].out;
+    }
+    for (var i = rsaMessageSize; i < k; i++) {
+        rsaVerifier.message[i] <== 0;
+    }
+    rsaVerifier.modulus <== pubkey;
+    rsaVerifier.signature <== signature;
+
+    if (enableHeaderMasking == 1) {
+        signal input headerMask[maxHeadersLength];
+        signal output maskedHeader[maxHeadersLength];
+        component byteMask = ByteMask(maxHeadersLength);
+        
+        byteMask.in <== emailHeader;
+        byteMask.mask <== headerMask;
+        maskedHeader <== byteMask.out;
+    }
+
+    // Calculate the SHA256 hash of the body and verify it matches the hash in the header
+    if (ignoreBodyHashCheck != 1) {
+        signal input bodyHashIndex;
+        signal input precomputedSHA[32];
+        signal input emailBody[maxBodyLength];
+        signal input emailBodyLength;
+
+
+        // Assert `emailBodyLength` fits in `ceil(log2(maxBodyLength))`
+        component n2bBodyLength = Num2Bits(log2Ceil(maxBodyLength));
+        n2bBodyLength.in <== emailBodyLength;
+
+
+        // Assert data after the body (`maxBodyLength - emailBody.length`) is all zeroes
+        AssertZeroPadding(maxBodyLength)(emailBody, emailBodyLength);
+
+
+        // Body hash regex - 617,597 constraints
+        // Extract the body hash from the header (i.e. the part after bh= within the DKIM-signature section)
+        signal (bhRegexMatch, bhReveal[maxHeadersLength]) <== BodyHashRegex(maxHeadersLength)(emailHeader);
+        bhRegexMatch === 1;
+
+        var shaB64Length = 44; // Length of SHA-256 hash when base64 encoded - ceil(32 / 3) * 4
+        signal bhBase64[shaB64Length] <== SelectRegexReveal(maxHeadersLength, shaB64Length)(bhReveal, bodyHashIndex);
+        signal headerBodyHash[32] <== Base64Decode(32)(bhBase64);
+
+        // Compute SHA256 of email body : 760,142 constraints (for maxBodyLength = 1536)
+        // We are using a technique to save constraints by precomputing the SHA hash of the body till the area we want to extract
+        // It doesn't have an impact on security since a user must have known the pre-image of a signed message to be able to fake it
+        signal computedBodyHash[256] <== Sha256BytesPartial(maxBodyLength)(emailBody, emailBodyLength, precomputedSHA);
+
+        // Ensure the bodyHash from the header matches the calculated body hash
+        component computedBodyHashInts[32];
+        for (var i = 0; i < 32; i++) {
+            computedBodyHashInts[i] = Bits2Num(8);
+            for (var j = 0; j < 8; j++) {
+                computedBodyHashInts[i].in[7 - j] <== computedBodyHash[i * 8 + j];
+            }
+            computedBodyHashInts[i].out === headerBodyHash[i];
+        }
+
+        if (removeSoftLineBreaks == 1) {
+            signal input decodedEmailBodyIn[maxBodyLength];
+            component qpEncodingChecker = RemoveSoftLineBreaks(maxBodyLength);
+
+            qpEncodingChecker.encoded <== emailBody;
+            qpEncodingChecker.decoded <== decodedEmailBodyIn;
+
+            qpEncodingChecker.isValid === 1;
+        }
+
+        if (enableBodyMasking == 1) {
+            signal input bodyMask[maxBodyLength];
+            signal output maskedBody[maxBodyLength];
+            component byteMask = ByteMask(maxBodyLength);
+            
+            byteMask.in <== emailBody;
+            byteMask.mask <== bodyMask;
+            maskedBody <== byteMask.out;
+        }
+    }
+
+    // Calculate the Poseidon hash of DKIM public key as output
+    // This can be used to verify (by verifier/contract) the pubkey used in the proof without needing the full key
+    // Since PoseidonLarge concatenates nearby values its important to use same n/k (recommended 121*17) to produce uniform hashes
+    // https://zkrepl.dev/?gist=43ce7dce2466c63812f6efec5b13aa73 - This can be used to calculate the pubkey hash separately
+    pubkeyHash <== PoseidonLarge(n, k)(pubkey);
+}
+
+
+
+---
+File: /@zk-email/circuits/package.json
+---
+
+{
+  "_from": "@zk-email/circuits",
+  "_id": "@zk-email/circuits@6.3.2",
+  "_inBundle": false,
+  "_integrity": "sha512-CJwVFUKUi6x0Hn/GSfn0XjI2WpMbNTon2UyMtzTALu1FS5kQOYES5byV7Jho8q4IuejDQ8ye70fN4R5EbIw77Q==",
+  "_location": "/@zk-email/circuits",
+  "_phantomChildren": {},
+  "_requested": {
+    "type": "tag",
+    "registry": true,
+    "raw": "@zk-email/circuits",
+    "name": "@zk-email/circuits",
+    "escapedName": "@zk-email%2fcircuits",
+    "scope": "@zk-email",
+    "rawSpec": "",
+    "saveSpec": null,
+    "fetchSpec": "latest"
+  },
+  "_requiredBy": [
+    "#USER",
+    "/"
+  ],
+  "_resolved": "https://registry.npmjs.org/@zk-email/circuits/-/circuits-6.3.2.tgz",
+  "_shasum": "4c2773055a3a3148be6cd7ee77698b7a8d593542",
+  "_spec": "@zk-email/circuits",
+  "_where": "/home/ndb/Desktop/Hints",
+  "babel": {
+    "presets": [
+      [
+        "@babel/preset-env",
+        {
+          "targets": {
+            "node": "current"
+          }
+        }
+      ],
+      "@babel/preset-typescript",
+      [
+        "jest"
+      ]
+    ]
+  },
+  "bundleDependencies": false,
+  "dependencies": {
+    "@zk-email/zk-regex-circom": "^2.3.1",
+    "circomlib": "^2.0.5"
+  },
+  "deprecated": false,
+  "description": "The `circuits` package exports the circom circuits needed for building on ZK Email.",
+  "devDependencies": {
+    "@babel/core": "^7.22.5",
+    "@babel/preset-env": "^7.22.2",
+    "@babel/preset-typescript": "^7.21.5",
+    "babel-jest": "^29.5.0",
+    "babel-preset-jest": "^29.5.0",
+    "circom_tester": "^0.0.20",
+    "circomlibjs": "^0.1.7",
+    "jest": "^29.5.0",
+    "typescript": "^5.2.2"
+  },
+  "files": [
+    "/helpers",
+    "/lib",
+    "/utils",
+    "./email-verifier.circom"
+  ],
+  "license": "MIT",
+  "name": "@zk-email/circuits",
+  "scripts": {
+    "publish": "yarn npm publish --access=public",
+    "test": "NODE_OPTIONS=--max_old_space_size=8192 jest --runInBand --detectOpenHandles --forceExit --verbose tests"
+  },
+  "version": "6.3.2"
+}
+
+
+
+---
+File: /@zk-email/circuits/README.md
+---
+
+# @zk-email/circuits
+The `circuits` package exports the circom circuits needed for building on ZK Email. 
+
+All circuits in this package are libraries that can be imported to your circom project (i.e this package does not contain a `main` circuit).
+
+<br />
+
+## Installation 
+```
+yarn add @zk-email/circuits
+```
+
+<br />
+
+## EmailVerifier Circuit
+
+[`EmailVerifier`](./email-verifier.circom "Email Verifier Circuit") is the primary circuit exported from `@zk-email/circuits` which is used for proving the signature of the input email is valid. 
+
+### Usage:
+
+Import to your circuit file like below. 
+```
+include "@zk-email/circuits/email-verifier.circom";
+```
+
+- **Parameters**:
+  - `maxHeadersLength`: Maximum length for the email header.
+  - `maxBodyLength`: Maximum length for the email body.
+  - `n`: Number of bits per chunk the RSA key is split into. Recommended to be 121.
+  - `k`: Number of chunks the RSA key is split into. Recommended to be 17.
+  - `ignoreBodyHashCheck`: Set 1 to skip body hash check in case data to prove/extract is only in the headers.
+  - `enableHeaderMasking`: Set 1 to turn on header masking.
+  - `enableBodyMasking`: Set 1 to turn on body masking.
+  - `removeSoftLineBreaks`: Set 1 to remove soft line breaks (`=\r\n`) from the email body.
+  
+  `Note`: We use these values for n and k because their product (n * k) needs to be more than 2048 (RSA constraint) and n has to be less than half of 255 to fit in a circom signal.
+
+- **Input Signals**:
+  - `emailHeader[maxHeadersLength]`: Email headers that are signed (ones in `DKIM-Signature` header) as ASCII int[], padded as per SHA-256 block size.
+  - `emailHeaderLength`: Length of the email header including the SHA-256 padding.
+  - `pubkey[k]`: RSA public key split into k chunks of n bits each.
+  - `signature[k]`: RSA signature split into k chunks of n bits each.
+  - `emailBody[maxBodyLength]`: Email body after the precomputed SHA as ASCII int[], padded as per SHA-256 block size.
+  - `emailBodyLength`: Length of the email body including the SHA-256 padding.
+  - `bodyHashIndex`: Index of the body hash `bh` in the `emailHeader`.
+  - `precomputedSHA[32]`: Precomputed SHA-256 hash of the email body till the bodyHashIndex.
+  - `headerMask[maxHeadersLength]`: Mask to be applied on the `emailHeader`.
+  - `bodyMask[maxBodyLength]`: Mask to be applied on the `emailBody`.
+  - `decodedEmailBody[maxBodyLength]`: Decoded email body after removing soft line breaks.
+
+  **Output Signal** 
+  - `pubkeyHash`: Poseidon hash of the pubkey - Poseidon(n/2)(n/2 chunks of pubkey with k*2 bits per chunk).
+  - `maskedHeader[maxHeadersLength]`: Masked email header.
+  - `maskedBody[maxBodyLength]`: Masked email body.
+<br/>
+
+## **Libraries**
+This section contains a template library located in the `@zk-email/circuits/lib` directory. These templates are important for building your main circuit (EmailVerifier).
+
+These templates are used in the `EmailVerifier` circuit, and can also be used in a wide range of ZK projects, even those not directly related to ZK Email.
+
+### `lib/rsa.circom`
+
+<details>
+<summary>
+RSAVerifier65537: Verifies RSA signatures with exponent 65537.
+</summary>
+
+- **[Source](lib/rsa.circom#L13-L39)**
+- **Parameters**
+  - `n`: Number of bits per chunk the modulus is split into. Recommended to be 121.
+  - `k`: Number of chunks the modulus is split into. Recommended to be 17.
+- **Inputs**: 
+  - `message[k]`: The message that was signed.
+  - `signature[k]`: The signature to verify.
+  - `modulus[k]`: The modulus of the RSA key (pubkey).
+
+</details>
+
+
+### `lib/sha.circom`
+
+<details>
+<summary>
+Sha256Bytes: Computes the SHA256 hash of input bytes.
+</summary>
+
+- **[Source](lib/sha.circom#L17-L38)**
+- **Parameters**
+  - `maxByteLength`: Maximum length of the input bytes.
+- **Inputs**:
+  - `paddedIn[maxByteLength]`: Message to hash padded as per the SHA256 specification.
+  - `paddedInLength`: Length of the message in bytes including padding.
+- **Output**:
+  - `out[256]`: The 256-bit hash of the input message.
+
+</details>
+
+
+<details>
+<summary>
+Sha256BytesPartial: Computes the SHA256 hash of input bytes with a precomputed state.
+</summary>
+
+- **[Source](lib/sha.circom#L41-L79)**
+- **Parameters**
+  - `maxByteLength`: Maximum length of the input bytes.
+- **Inputs**:
+  - `paddedIn[maxByteLength]`: Message to hash padded as per the SHA256 specification.
+  - `paddedInLength`: Length of the message in bytes including padding.
+  - `preHash[32]`: The precomputed state of the hash.
+- **Output**:
+  - `out[256]`: The 256-bit hash of the input message.
+
+</details>
+
+
+### `lib/base64.circom`
+
+<details>
+<summary>
+Base64Decode: Decodes a base64 encoded string into binary data.
+</summary>
+
+- **[Source](lib/base64.circom#L11-L61)**
+- **Inputs**:
+  - `in`: The base64 encoded string to decode.
+  - `N`: The expected length of the output binary data.
+- **Outputs**:
+  - `out`: The decoded binary data.
+
+</details>
+
+## Utils
+This section provides an overview of utility circom templates available in the `@zk-email/circuits/utils` directory. These templates assist in the construction of ZK circuits for various applications beyond the core ZK Email functionalities.
+
+> Important: When using these templates outside of zk-email, please ensure you read the assumptions on the input signals that are documented above each template source code. You would need to constrain the inputs accordingly before you pass them to these utility circuits.
+
+### `utils/array.circom`
+
+<details>
+<summary>
+AssertZeroPadding: Asserts that the input array is zero-padded from the given `startIndex`.
+</summary>
+
+- **[Source](utils/array.circom#L154-L172)**
+- **Parameters**:
+  - `maxArrayLen`: The maximum number of elements in the input array.
+- **Inputs**:
+  - `in`: The input array.
+  - `startIndex`: The index from which the array should be zero-padded.
+
+</details>
+
+<details>
+<summary>
+ItemAtIndex: Selects an item at a given index from the input array.
+</summary>
+
+- **[Source](utils/array.circom#L15-L42)**
+- **Parameters**:
+  - `maxArrayLen`: The number of elements in the array.
+- **Inputs**:
+  - `in`: The input array.
+  - `index`: The index of the element to select.
+- **Output**:
+  - `out`: The selected element.
+
+</details>
+
+<details>
+<summary>
+CalculateTotal: Calculates the sum of an array.
+</summary>
+
+- **[Source](utils/array.circom#L54-L67)**
+- **Parameters**:
+  - `n`: The number of elements in the array.
+- **Inputs**:
+  - `nums`: The input array.
+- **Output**:
+  - `sum`: The sum of the input array.
+
+</details>
+
+<details>
+<summary>
+SelectSubArray: Selects a subarray from an array given a `startIndex` and `length`.
+</summary>
+
+- **[Source](utils/array.circom#L80-L104)**
+- **Parameters**:
+  - `maxArrayLen`: The maximum number of bytes in the input array.
+  - `maxSubArrayLen`: The maximum number of integers in the output array.
+- **Inputs**:
+  - `in`: The input byte array.
+  - `startIndex`: The start index of the subarray.
+  - `length`: The length of the subarray.
+- **Output**:
+  - `out`: Array of `maxSubArrayLen` size, items starting from `startIndex`, and items after `length` set to zero.
+
+</details>
+
+<details>
+<summary>
+VarShiftLeft: Shifts input array by `shift` indices to the left.
+</summary>
+
+- **[Source](utils/array.circom#L116-L140)**
+- **Parameters**:
+  - `maxArrayLen`: The maximum length of the input array.
+  - `maxOutArrayLen`: The maximum length of the output array.
+- **Inputs**:
+  - `in`: The input array.
+  - `shift`: The number of indices to shift the array to the left.
+- **Output**:
+  - `out`: Shifted subarray.
+
+</details>
+
+
+### `utils/bytes.circom`
+
+<details>
+<summary>
+PackBytes: Packs an array of bytes to numbers that fit in the field.
+</summary>
+
+- **[Source](utils/bytes.circom#L28-L60)**
+- **Inputs**:
+  - `in`: The input byte array.
+  - `maxBytes`: The maximum number of bytes in the input array.
+- **Outputs**:
+  - `out`: The output integer array after packing.
+
+</details>
+
+<details>
+<summary>
+PackByteSubArray: Selects a sub-array from the input array and packs it to numbers that fit in the field.
+</summary>
+
+- **[Source](utils/bytes.circom#L72-L93)**
+- **Inputs**:
+  - `in`: The input byte array.
+  - `startIndex`: The start index of the sub-array.
+  - `length`: The length of the sub-array.
+  - `maxArrayLen`: The maximum number of elements in the input array.
+  - `maxSubArrayLen`: The maximum number of elements in the sub-array.
+- **Outputs**:
+  - `out`: The output integer array after packing the sub-array.
+</details>
+
+<details>
+<summary>
+DigitBytesToInt: Converts a byte array representing digits to an integer.
+</summary>
+
+- **[Source](utils/bytes.circom#L102-L117)**
+- **Inputs**:
+  - `in`: The input byte array - big-endian digit string of `out`.
+  - `n`: The number of bytes in the input array.
+- **Outputs**:
+  - `out`: The output integer after conversion.
+</details>
+
+<details>
+<summary>
+AssertBit: Asserts that a given input is binary.
+</summary>
+
+- **[Source](utils/bytes.circom#L1-L7)**
+- **Inputs**:
+  - `in`: An input signal, expected to be 0 or 1.
+- **Outputs**:
+  - None. This template will throw an assertion error if the input is not binary.
+
+</details>
+
+<details>
+<summary>
+ByteMask: Masks an input array using a binary mask array.
+</summary>
+
+- **[Source](utils/bytes.circom#L9-L25)**
+- **Parameters**:
+  - `maxLength`: The maximum length of the input and mask arrays.
+- **Inputs**:
+  - `in`: An array of signals representing the body to be masked.
+  - `mask`: An array of signals representing the binary mask.
+- **Outputs**:
+  - `out`: An array of signals representing the masked input.
+</details>
+
+### `utils/constants.circom`
+
+<details>
+<summary>
+Constants: Defines a set of constants used across various circom circuits for standardizing sizes and lengths of different data types.
+</summary>
+
+- **[Source](utils/constants.circom)**
+- **Constants**:
+  - `EMAIL_ADDR_MAX_BYTES()`: Returns the maximum byte size for an email, defined as 256.
+  - `DOMAIN_MAX_BYTES()`: Returns the maximum byte size for a domain, defined as 255.
+  - `MAX_BYTES_IN_FIELD()`: Returns the maximum number of bytes that can fit in a field, defined as 31.
+
+</details>
+
+
+### `utils/functions.circom`
+
+<details>
+<summary>
+log2Ceil: Calculate log2 of a number and round it up
+</summary>
+
+- **[Source](utils/functions.circom#L2-L10)**
+- **Inputs**:
+  - `a`: The input number for which the `ceil(log2())` needs to be calculated.
+- **Outputs**:
+  - Returns `ceil(log2())` of the input number.
+</details>
+
+
+### `utils/hash.circom`
+
+<details>
+<summary>
+PoseidonLarge: Circuit to calculate Poseidon hash of inputs more than 16.
+</summary>
+
+- **[Source](utils/hash.circom#L13-L37)**
+- **Inputs**:
+  - `in[chunkSize]`: The input array of chunkSize elements.
+  - `bytesPerChunk`: Number of bits in each chunk.
+  - `chunkSize`: Number of chunks in input.
+- **Outputs**:
+  - `out`: Poseidon hash of input where consecutive elements are merged.
+</details>
+
+
+### `utils/regex.circom`
+
+<details>
+<summary>
+SelectRegexReveal: Selects the reveal part of a byte array that matches a regular expression.
+</summary>
+
+- **[Source](utils/regex.circom#L15-L50)**
+- **Inputs**:
+  - `in`: The input byte array.
+  - `startIndex`: The index of the start of the reveal part in the input array.
+  - `maxArrayLen`: The maximum length of the input array.
+  - `maxRevealLen`: The maximum length of the reveal part.
+- **Outputs**:
+  - `out`: The revealed data array that matches the regular expression.
+</details>
+
+<details>
+<summary>
+PackRegexReveal: Packs the reveal data from a regex match into an integer array.
+</summary>
+
+- **[Source](utils/regex.circom#L60-L77)**
+- **Inputs**:
+  - `in`: The input byte array.
+  - `startIndex`: The index of the start of the reveal part in the input array.
+  - `maxArrayLen`: The maximum length of the input array.
+  - `maxRevealLen`: The maximum length of the reveal part.
+- **Outputs**:
+  - `out`: The packed integer array after processing the reveal data.
+</details>
+
+## Helpers
+This section contains helper circom templates in` @zk-email/circuits/helpers` that you can use to build on top of ZK Email.
+
+### `helpers/email-nullifier.circom`
+
+<details>
+
+<summary>
+EmailNullifier: Calculates the email nullifier using Poseidon hash.
+</summary>
+
+- **[Source](helpers/email-nullifier.circom#L15-L23)**
+- **Parameters**:
+  - `bitPerChunk`: The number of bits per chunk the signature is split into.
+  - `chunkSize`: The number of chunks the signature is split into.
+- **Inputs**:
+  - `signature[chunkSize]`: The signature of the email.
+- **Output**:
+  - `out`: The email nullifier.
+</details>
+
+### `helpers/remove-soft-line-breaks.circom`
+
+<details>
+<summary>
+RemoveSoftLineBreaks: Verifies the removal of soft line breaks from an encoded input string.
+</summary>
+
+- **[Source](helpers/remove-soft-line-breaks.circom)**
+- **Parameters**:
+  - `maxLength`: The maximum length of the input strings.
+- **Inputs**:
+  - `encoded[maxLength]`: An array of ASCII values representing the input string with potential soft line breaks.
+  - `decoded[maxLength]`: An array of ASCII values representing the expected output after removing soft line breaks.
+- **Outputs**:
+  - `isValid`: A signal that is 1 if the decoded input correctly represents the encoded input with soft line breaks removed, 0 otherwise.
+
+</details>
+
+
+---
+File: /@zk-email/helpers/dist/dkim/dns-archive.d.ts
+---
+
+export declare function resolveDNSFromZKEmailArchive(name: string, type: string): Promise<any[]>;
+
+
+
+---
+File: /@zk-email/helpers/dist/dkim/dns-archive.js
+---
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.resolveDNSFromZKEmailArchive = resolveDNSFromZKEmailArchive;
+const tools_1 = require("../lib/mailauth/tools");
+const ZKEMAIL_DNS_ARCHIVER_API = 'https://archive.prove.email/api/key';
+async function resolveDNSFromZKEmailArchive(name, type) {
+    if (type !== 'TXT') {
+        throw new Error(`ZK Email Archive only supports TXT records - got ${type}`);
+    }
+    // Get domain from full dns record name - $selector._domainkey.$domain.com
+    const domain = name.split('.').slice(2).join('.');
+    const selector = name.split('.')[0];
+    const queryUrl = new URL(ZKEMAIL_DNS_ARCHIVER_API);
+    queryUrl.searchParams.set('domain', domain);
+    const resp = await fetch(queryUrl);
+    const data = await resp.json();
+    const dkimRecord = data.find((record) => record.selector === selector);
+    if (!dkimRecord) {
+        throw new tools_1.CustomError(`DKIM record not found for domain ${domain} and selector ${selector} in ZK Email Archive.`, 'ENODATA');
+    }
+    return [dkimRecord.value];
+}
+
+
+
+---
+File: /@zk-email/helpers/dist/dkim/dns-over-http.d.ts
+---
+
+export declare enum DoHServer {
+    Google = "https://dns.google/resolve",
+    Cloudflare = "https://cloudflare-dns.com/dns-query"
+}
+/**
+ * DNS over HTTPS (DoH) resolver
+ *
+ * @export
+ * @class DoH
+ */
+export declare class DoH {
+    static DoHStatusNoError: number;
+    static DoHTypeTXT: number;
+    /**
+     * Resolve DKIM public key from DNS
+     *
+     * @static
+     * @param {string} name DKIM record name (e.g. 20230601._domainkey.gmail.com)
+     * @param {string} dnsServerURL DNS over HTTPS API URL
+     * @return {*}  {(Promise<string | null>)} DKIM public key or null if not found
+     * @memberof DoH
+     */
+    static resolveDKIMPublicKey(name: string, dnsServerURL: string): Promise<string | null>;
+}
+export declare function resolveDNSHTTP(name: string, type: string): Promise<string[]>;
+
+
+
+---
+File: /@zk-email/helpers/dist/dkim/dns-over-http.js
+---
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.DoH = exports.DoHServer = void 0;
+exports.resolveDNSHTTP = resolveDNSHTTP;
+const tools_1 = require("../lib/mailauth/tools");
+// DoH servers list
+var DoHServer;
+(function (DoHServer) {
+    // Google Public DNS
+    DoHServer["Google"] = "https://dns.google/resolve";
+    // Cloudflare DNS
+    DoHServer["Cloudflare"] = "https://cloudflare-dns.com/dns-query";
+})(DoHServer || (exports.DoHServer = DoHServer = {}));
+/**
+ * DNS over HTTPS (DoH) resolver
+ *
+ * @export
+ * @class DoH
+ */
+class DoH {
+    /**
+     * Resolve DKIM public key from DNS
+     *
+     * @static
+     * @param {string} name DKIM record name (e.g. 20230601._domainkey.gmail.com)
+     * @param {string} dnsServerURL DNS over HTTPS API URL
+     * @return {*}  {(Promise<string | null>)} DKIM public key or null if not found
+     * @memberof DoH
+     */
+    static async resolveDKIMPublicKey(name, dnsServerURL) {
+        let cleanURL = dnsServerURL;
+        if (!cleanURL.startsWith('https://')) {
+            cleanURL = `https://${cleanURL}`;
+        }
+        if (cleanURL.endsWith('/')) {
+            cleanURL = cleanURL.slice(0, -1);
+        }
+        const queryUrl = new URL(cleanURL);
+        queryUrl.searchParams.set('name', name);
+        queryUrl.searchParams.set('type', DoH.DoHTypeTXT.toString());
+        const resp = await fetch(queryUrl, {
+            headers: {
+                accept: 'application/dns-json',
+            },
+        });
+        if (resp.status === 200) {
+            const out = await resp.json();
+            if (typeof out === 'object' && out !== null && 'Status' in out && 'Answer' in out) {
+                const result = out;
+                if (result.Status === DoH.DoHStatusNoError && result.Answer.length > 0) {
+                    for (const ans of result.Answer) {
+                        if (ans.type === DoH.DoHTypeTXT) {
+                            let dkimRecord = ans.data;
+                            /*
+                                Remove all double quotes
+                                Some DNS providers wrap TXT records in double quotes,
+                                and others like Cloudflare may include them. According to
+                                TXT (potentially multi-line) and DKIM (Base64 data) standards,
+                                we can directly remove all double quotes from the DKIM public key.
+                            */
+                            dkimRecord = dkimRecord.replace(/"/g, '');
+                            return dkimRecord;
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+}
+exports.DoH = DoH;
+// DNS response codes
+DoH.DoHStatusNoError = 0;
+// DNS RR types
+DoH.DoHTypeTXT = 16;
+async function resolveDNSHTTP(name, type) {
+    if (type !== 'TXT') {
+        throw new Error(`DNS over HTTP: Only type TXT is supported, got ${type}`);
+    }
+    const googleResult = await DoH.resolveDKIMPublicKey(name, DoHServer.Google);
+    if (!googleResult) {
+        throw new tools_1.CustomError('No DKIM record found in Google', 'ENODATA');
+    }
+    const regex = /p=([^;]*)/;
+    const match = regex.exec(googleResult);
+    if (match) {
+        const valueAfterP = match[1]; // Extracting the value after p=
+        if (valueAfterP === '') {
+            throw new tools_1.CustomError('No DKIM record found in Google (empty p=)', 'ENODATA');
+        }
+    }
+    const cloudflareResult = await DoH.resolveDKIMPublicKey(name, DoHServer.Cloudflare);
+    // Log an error if there is a mismatch in the result
+    if (googleResult !== cloudflareResult) {
+        console.error('DKIM record mismatch between Google and Cloudflare! Using Google result.');
+    }
+    return [googleResult];
+}
+
+
+
+---
+File: /@zk-email/helpers/dist/dkim/index.d.ts
+---
+
+export interface DKIMVerificationResult {
+    publicKey: bigint;
+    signature: bigint;
+    headers: Buffer;
+    body: Buffer;
+    bodyHash: string;
+    signingDomain: string;
+    selector: string;
+    algo: string;
+    format: string;
+    modulusLength: number;
+    appliedSanitization?: string;
+}
+/**
+ *
+ * @param email Entire email data as a string or buffer
+ * @param domain Domain to verify DKIM signature for. If not provided, the domain is extracted from the `From` header
+ * @param enableSanitization If true, email will be applied with various sanitization to try and pass DKIM verification
+ * @param fallbackToZKEmailDNSArchive If true, ZK Email DNS Archive (https://archive.prove.email/api-explorer) will
+ *                                    be used to resolve DKIM public keys if we cannot resolve from HTTP DNS
+ * @returns
+ */
+export declare function verifyDKIMSignature(email: Buffer | string, domain?: string, enableSanitization?: boolean, fallbackToZKEmailDNSArchive?: boolean): Promise<DKIMVerificationResult>;
+
+
+
+---
+File: /@zk-email/helpers/dist/dkim/index.js
+---
+
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.verifyDKIMSignature = verifyDKIMSignature;
+const node_forge_1 = require("node-forge");
+const dkim_verifier_1 = require("../lib/mailauth/dkim-verifier");
+const tools_1 = require("../lib/mailauth/tools");
+const sanitizers_1 = __importDefault(require("./sanitizers"));
+const dns_over_http_1 = require("./dns-over-http");
+const dns_archive_1 = require("./dns-archive");
+/**
+ *
+ * @param email Entire email data as a string or buffer
+ * @param domain Domain to verify DKIM signature for. If not provided, the domain is extracted from the `From` header
+ * @param enableSanitization If true, email will be applied with various sanitization to try and pass DKIM verification
+ * @param fallbackToZKEmailDNSArchive If true, ZK Email DNS Archive (https://archive.prove.email/api-explorer) will
+ *                                    be used to resolve DKIM public keys if we cannot resolve from HTTP DNS
+ * @returns
+ */
+async function verifyDKIMSignature(email, domain = '', enableSanitization = true, fallbackToZKEmailDNSArchive = false) {
+    const emailStr = email.toString();
+    let dkimResult = await tryVerifyDKIM(email, domain, fallbackToZKEmailDNSArchive);
+    // If DKIM verification fails, try again after sanitizing email
+    let appliedSanitization;
+    if (dkimResult.status.comment === 'bad signature' && enableSanitization) {
+        const results = await Promise.all(sanitizers_1.default.map((sanitize) => tryVerifyDKIM(sanitize(emailStr), domain, fallbackToZKEmailDNSArchive).then((result) => ({
+            result,
+            sanitizer: sanitize.name,
+        }))));
+        const passed = results.find((r) => r.result.status.result === 'pass');
+        if (passed) {
+            console.log(`DKIM: Verification passed after applying sanitization "${passed.sanitizer}"`);
+            dkimResult = passed.result;
+            appliedSanitization = passed.sanitizer;
+        }
+    }
+    const { status: { result, comment }, signingDomain, publicKey, signature, status, body, bodyHash, } = dkimResult;
+    if (result !== 'pass') {
+        throw new Error(`DKIM signature verification failed for domain ${signingDomain}. Reason: ${comment}`);
+    }
+    const pubKeyData = node_forge_1.pki.publicKeyFromPem(publicKey.toString());
+    return {
+        signature: BigInt(`0x${Buffer.from(signature, 'base64').toString('hex')}`),
+        headers: status.signedHeaders,
+        body,
+        bodyHash,
+        signingDomain: dkimResult.signingDomain,
+        publicKey: BigInt(pubKeyData.n.toString()),
+        selector: dkimResult.selector,
+        algo: dkimResult.algo,
+        format: dkimResult.format,
+        modulusLength: dkimResult.modulusLength,
+        appliedSanitization,
+    };
+}
+async function tryVerifyDKIM(email, domain = '', fallbackToZKEmailDNSArchive = false) {
+    const resolver = async (name, type) => {
+        try {
+            const result = await (0, dns_over_http_1.resolveDNSHTTP)(name, type);
+            return result;
+        }
+        catch (e) {
+            if (fallbackToZKEmailDNSArchive) {
+                console.log('DNS over HTTP failed, falling back to ZK Email Archive');
+                const result = await (0, dns_archive_1.resolveDNSFromZKEmailArchive)(name, type);
+                return result;
+            }
+            throw e;
+        }
+    };
+    const dkimVerifier = new dkim_verifier_1.DkimVerifier({
+        resolver,
+    });
+    await (0, tools_1.writeToStream)(dkimVerifier, email);
+    let domainToVerifyDKIM = domain;
+    if (!domainToVerifyDKIM) {
+        if (dkimVerifier.headerFrom.length > 1) {
+            throw new Error('Multiple From header in email and domain for verification not specified');
+        }
+        domainToVerifyDKIM = dkimVerifier.headerFrom[0].split('@')[1];
+    }
+    const dkimResult = dkimVerifier.results.find((d) => d.signingDomain === domainToVerifyDKIM);
+    if (!dkimResult) {
+        throw new Error(`DKIM signature not found for domain ${domainToVerifyDKIM}`);
+    }
+    dkimResult.headers = dkimVerifier.headers;
+    return dkimResult;
+}
+
+
+
+---
+File: /@zk-email/helpers/dist/dkim/sanitizers.d.ts
+---
+
+declare function revertGoogleMessageId(email: string): string;
+declare const sanitizers: (typeof revertGoogleMessageId)[];
+export default sanitizers;
+
+
+
+---
+File: /@zk-email/helpers/dist/dkim/sanitizers.js
+---
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+function getHeaderValue(email, header) {
+    const headerStartIndex = email.indexOf(`${header}: `) + header.length + 2;
+    const headerEndIndex = email.indexOf('\n', headerStartIndex);
+    const headerValue = email.substring(headerStartIndex, headerEndIndex);
+    return headerValue;
+}
+function setHeaderValue(email, header, value) {
+    return email.replace(getHeaderValue(email, header), value);
+}
+// Google sets their own Message-ID and put the original one  in X-Google-Original-Message-ID
+// when ARC forwarding
+// TODO: Add test for this
+function revertGoogleMessageId(email) {
+    // (Optional check) This only happens when google does ARC
+    if (!email.includes('ARC-Authentication-Results')) {
+        return email;
+    }
+    const googleReplacedMessageId = getHeaderValue(email, 'X-Google-Original-Message-ID');
+    if (googleReplacedMessageId) {
+        return setHeaderValue(email, 'Message-ID', googleReplacedMessageId);
+    }
+    return email;
+}
+// Remove labels inserted to Subject - `[ListName] Newsletter 2024` to `Newsletter 2024`
+function removeLabels(email) {
+    // Replace Subject: [label] with Subject:
+    const sanitized = email.replace(/Subject: \[.*\]/, 'Subject:');
+    return sanitized;
+}
+// Sometimes, newline encodings re-encode \r\n as just \n, so re-insert the \r
+// TODO: Add test for this
+function insert13Before10(email) {
+    const byteArray = new TextEncoder().encode(email);
+    const ret = new Uint8Array(byteArray.length + 1000);
+    let j = 0;
+    for (let i = 0; i < byteArray.length; i++) {
+        // Ensure each \n is preceded by a \r
+        if (byteArray[i] === 10 && i > 0 && byteArray[i - 1] !== 13) {
+            ret[j] = 13;
+            j++;
+        }
+        ret[j] = byteArray[i];
+        j++;
+    }
+    return Buffer.from(ret.slice(0, j).buffer).toString();
+}
+// Replace `=09` with `\t` in email
+// TODO: Add test for this
+function sanitizeTabs(email) {
+    return email.replace('=09', '\t');
+}
+const sanitizers = [revertGoogleMessageId, removeLabels, insert13Before10, sanitizeTabs];
+exports.default = sanitizers;
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/body/index.d.ts
+---
+
+import { SimpleHash } from './simple';
+import { RelaxedHash } from './relaxed';
+export declare const dkimBody: (canonicalization: any, options_0: string, options_1: number) => SimpleHash | RelaxedHash;
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/body/index.js
+---
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.dkimBody = void 0;
+const simple_1 = require("./simple");
+const relaxed_1 = require("./relaxed");
+const dkimBody = (canonicalization, ...options) => {
+    canonicalization = (canonicalization ?? 'simple/simple').toString().split('/').pop()?.toLowerCase().trim();
+    switch (canonicalization) {
+        case 'simple':
+            return new simple_1.SimpleHash(...options);
+        case 'relaxed':
+            return new relaxed_1.RelaxedHash(...options);
+        default:
+            throw new Error('Unknown body canonicalization');
+    }
+};
+exports.dkimBody = dkimBody;
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/body/relaxed.d.ts
+---
+
+import * as crypto from 'crypto';
+/**
+ * Class for calculating body hash of an email message body stream
+ * using the "relaxed" canonicalization
+ *
+ * @class
+ */
+export declare class RelaxedHash {
+    byteLength: number;
+    bodyHashedBytes: number;
+    private remainder;
+    private bodyHash;
+    private maxBodyLength;
+    private maxSizeReached;
+    private emptyLinesQueue;
+    private fullBody;
+    /**
+     * @param {String} [algorithm] Hashing algo, either "sha1" or "sha256"
+     * @param {Number} [maxBodyLength] Allowed body length count, the value from the l= parameter
+     */
+    constructor(algorithm: string, maxBodyLength: number);
+    private updateBodyHash;
+    private drainPendingEmptyLines;
+    private pushBodyHash;
+    fixLineBuffer(line: Buffer): Buffer;
+    update(chunk: Buffer | null, final: boolean): void;
+    digest(encoding: crypto.BinaryToTextEncoding): string;
+}
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/body/relaxed.js
+---
+
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.RelaxedHash = void 0;
+const crypto = __importStar(require("crypto"));
+const CHAR_CR = 0x0d;
+const CHAR_LF = 0x0a;
+const CHAR_SPACE = 0x20;
+const CHAR_TAB = 0x09;
+/**
+ * Class for calculating body hash of an email message body stream
+ * using the "relaxed" canonicalization
+ *
+ * @class
+ */
+class RelaxedHash {
+    /**
+     * @param {String} [algorithm] Hashing algo, either "sha1" or "sha256"
+     * @param {Number} [maxBodyLength] Allowed body length count, the value from the l= parameter
+     */
+    constructor(algorithm, maxBodyLength) {
+        algorithm = algorithm?.split('-')?.pop()?.toLowerCase() || 'sha256';
+        this.bodyHash = crypto.createHash(algorithm);
+        this.remainder = false;
+        this.byteLength = 0;
+        this.bodyHashedBytes = 0;
+        this.maxBodyLength = maxBodyLength;
+        this.maxSizeReached = false;
+        this.emptyLinesQueue = [];
+        this.fullBody = Buffer.alloc(0);
+    }
+    updateBodyHash(chunk) {
+        if (this.maxSizeReached) {
+            return;
+        }
+        // the following is needed for the l= option
+        if (typeof this.maxBodyLength === 'number' &&
+            !isNaN(this.maxBodyLength) &&
+            this.maxBodyLength >= 0 &&
+            this.bodyHashedBytes + chunk.length > this.maxBodyLength) {
+            this.maxSizeReached = true;
+            if (this.bodyHashedBytes >= this.maxBodyLength) {
+                // nothing to do here, skip entire chunk
+                return;
+            }
+            // only use allowed size of bytes
+            chunk = chunk.subarray(0, this.maxBodyLength - this.bodyHashedBytes);
+        }
+        this.bodyHashedBytes += chunk.length;
+        this.bodyHash.update(chunk);
+        this.fullBody = Buffer.concat([this.fullBody, Buffer.from(chunk)]);
+        //process.stdout.write(chunk);
+    }
+    drainPendingEmptyLines() {
+        if (this.emptyLinesQueue.length) {
+            for (let emptyLine of this.emptyLinesQueue) {
+                this.updateBodyHash(emptyLine);
+            }
+            this.emptyLinesQueue = [];
+        }
+    }
+    pushBodyHash(chunk) {
+        if (!chunk || !chunk.length) {
+            return;
+        }
+        // remove line endings
+        let foundNonLn = false;
+        // buffer line endings and empty lines
+        for (let i = chunk.length - 1; i >= 0; i--) {
+            if (chunk[i] !== CHAR_LF && chunk[i] !== CHAR_CR) {
+                this.drainPendingEmptyLines();
+                if (i < chunk.length - 1) {
+                    this.emptyLinesQueue.push(chunk.subarray(i + 1));
+                    chunk = chunk.subarray(0, i + 1);
+                }
+                foundNonLn = true;
+                break;
+            }
+        }
+        if (!foundNonLn) {
+            this.emptyLinesQueue.push(chunk);
+            return;
+        }
+        this.updateBodyHash(chunk);
+    }
+    fixLineBuffer(line) {
+        let resultLine = [];
+        let nonWspFound = false;
+        let prevWsp = false;
+        for (let i = line.length - 1; i >= 0; i--) {
+            if (line[i] === CHAR_LF) {
+                resultLine.unshift(line[i]);
+                if (i === 0 || line[i - 1] !== CHAR_CR) {
+                    // add missing carriage return
+                    resultLine.unshift(CHAR_CR);
+                }
+                continue;
+            }
+            if (line[i] === CHAR_CR) {
+                resultLine.unshift(line[i]);
+                continue;
+            }
+            if (line[i] === CHAR_SPACE || line[i] === CHAR_TAB) {
+                if (nonWspFound) {
+                    prevWsp = true;
+                }
+                continue;
+            }
+            if (prevWsp) {
+                resultLine.unshift(CHAR_SPACE);
+                prevWsp = false;
+            }
+            nonWspFound = true;
+            resultLine.unshift(line[i]);
+        }
+        if (prevWsp && nonWspFound) {
+            resultLine.unshift(CHAR_SPACE);
+        }
+        return Buffer.from(resultLine);
+    }
+    update(chunk, final) {
+        this.byteLength += (chunk && chunk.length) || 0;
+        if (this.maxSizeReached) {
+            return;
+        }
+        // Canonicalize content by applying a and b in order:
+        // a.1. Ignore all whitespace at the end of lines.
+        // a.2. Reduce all sequences of WSP within a line to a single SP character.
+        // b.1. Ignore all empty lines at the end of the message body.
+        // b.2. If the body is non-empty but does not end with a CRLF, a CRLF is added.
+        let lineEndPos = -1;
+        let lineNeedsFixing = false;
+        let cursorPos = 0;
+        if (this.remainder && this.remainder instanceof Buffer && this.remainder.length) {
+            if (chunk) {
+                // concatting chunks might be bad for performance :S
+                chunk = Buffer.concat([this.remainder, chunk]);
+            }
+            else {
+                chunk = this.remainder;
+            }
+            this.remainder = false;
+        }
+        if (chunk && chunk.length) {
+            for (let pos = 0; pos < chunk.length; pos++) {
+                switch (chunk[pos]) {
+                    case CHAR_LF:
+                        if (!lineNeedsFixing &&
+                            // previous character is not <CR>
+                            ((pos >= 1 && chunk[pos - 1] !== CHAR_CR) ||
+                                // LF is the first byte on the line
+                                pos === 0 ||
+                                // there's a space before line break
+                                (pos >= 2 && chunk[pos - 1] === CHAR_CR && chunk[pos - 2] === CHAR_SPACE))) {
+                            lineNeedsFixing = true;
+                        }
+                        // line break
+                        if (lineNeedsFixing) {
+                            // emit pending bytes up to the last line break before current line
+                            if (lineEndPos >= 0 && lineEndPos >= cursorPos) {
+                                let chunkPart = chunk.subarray(cursorPos, lineEndPos + 1);
+                                this.pushBodyHash(chunkPart);
+                            }
+                            let line = chunk.subarray(lineEndPos + 1, pos + 1);
+                            this.pushBodyHash(this.fixLineBuffer(line));
+                            lineNeedsFixing = false;
+                            // move cursor to the start of next line
+                            cursorPos = pos + 1;
+                        }
+                        lineEndPos = pos;
+                        break;
+                    case CHAR_SPACE:
+                        if (!lineNeedsFixing && pos && chunk[pos - 1] === CHAR_SPACE) {
+                            lineNeedsFixing = true;
+                        }
+                        break;
+                    case CHAR_TAB:
+                        // non-space WSP always needs replacing
+                        lineNeedsFixing = true;
+                        break;
+                    default:
+                }
+            }
+        }
+        if (chunk && cursorPos < chunk.length && cursorPos !== lineEndPos) {
+            // emit data from chunk
+            let chunkPart = chunk.subarray(cursorPos, lineEndPos + 1);
+            if (chunkPart.length) {
+                this.pushBodyHash(lineNeedsFixing ? this.fixLineBuffer(chunkPart) : chunkPart);
+                lineNeedsFixing = false;
+            }
+            cursorPos = lineEndPos + 1;
+        }
+        if (chunk && !final && cursorPos < chunk.length) {
+            this.remainder = chunk.subarray(cursorPos);
+        }
+        if (final) {
+            let chunkPart = (cursorPos && chunk && chunk.subarray(cursorPos)) || chunk;
+            if (chunkPart && chunkPart.length) {
+                this.pushBodyHash(lineNeedsFixing ? this.fixLineBuffer(chunkPart) : chunkPart);
+                lineNeedsFixing = false;
+            }
+            if (this.bodyHashedBytes) {
+                // terminating line break for non-empty messages
+                this.updateBodyHash(Buffer.from([CHAR_CR, CHAR_LF]));
+            }
+        }
+    }
+    digest(encoding) {
+        this.update(null, true);
+        // finalize
+        return this.bodyHash.digest(encoding);
+    }
+}
+exports.RelaxedHash = RelaxedHash;
+/*
+let fs = require('fs');
+
+const getBody = message => {
+    message = message.toString('binary');
+    let match = message.match(/\r?\n\r?\n/);
+    if (match) {
+        message = message.substr(match.index + match[0].length);
+    }
+    return Buffer.from(message, 'binary');
+};
+
+let s = fs.readFileSync(process.argv[2]);
+
+let k = new RelaxedHash('rsa-sha256', -1);
+
+for (let byte of getBody(s)) {
+    k.update(Buffer.from([byte]));
+}
+
+console.error(k.digest('base64'));
+console.error(k.byteLength, k.bodyHashedBytes);
+*/
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/body/simple.d.ts
+---
+
+import * as crypto from 'crypto';
+/**
+ * Class for calculating body hash of an email message body stream
+ * using the "simple" canonicalization
+ *
+ * @class
+ */
+export declare class SimpleHash {
+    byteLength: number;
+    bodyHashedBytes: number;
+    private remainder;
+    private bodyHash;
+    private maxBodyLength;
+    private fullBody;
+    private lastNewline;
+    /**
+     * @param {String} [algorithm] Hashing algo, either "sha1" or "sha256"
+     * @param {Number} [maxBodyLength] Allowed body length count, the value from the l= parameter
+     */
+    constructor(algorithm: string, maxBodyLength: number);
+    private updateBodyHash;
+    update(chunk: Buffer): void;
+    digest(encoding: crypto.BinaryToTextEncoding): string;
+}
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/body/simple.js
+---
+
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.SimpleHash = void 0;
+const crypto = __importStar(require("crypto"));
+/**
+ * Class for calculating body hash of an email message body stream
+ * using the "simple" canonicalization
+ *
+ * @class
+ */
+class SimpleHash {
+    /**
+     * @param {String} [algorithm] Hashing algo, either "sha1" or "sha256"
+     * @param {Number} [maxBodyLength] Allowed body length count, the value from the l= parameter
+     */
+    constructor(algorithm, maxBodyLength) {
+        algorithm = algorithm?.split('-')?.pop() || 'sha256';
+        this.bodyHash = crypto.createHash(algorithm);
+        this.remainder = [];
+        this.byteLength = 0;
+        this.bodyHashedBytes = 0;
+        this.maxBodyLength = maxBodyLength;
+        this.lastNewline = false;
+        this.fullBody = Buffer.alloc(0);
+    }
+    updateBodyHash(chunk) {
+        // the following is needed for l= option
+        if (typeof this.maxBodyLength === 'number' &&
+            !isNaN(this.maxBodyLength) &&
+            this.maxBodyLength >= 0 &&
+            this.bodyHashedBytes + chunk.length > this.maxBodyLength) {
+            if (this.bodyHashedBytes >= this.maxBodyLength) {
+                // nothing to do here, skip entire chunk
+                return;
+            }
+            // only use allowed size of bytes
+            chunk = chunk.subarray(0, this.maxBodyLength - this.bodyHashedBytes);
+        }
+        this.bodyHashedBytes += chunk.length;
+        this.bodyHash.update(chunk);
+        this.fullBody = Buffer.concat([this.fullBody, chunk]);
+        //process.stdout.write(chunk);
+    }
+    update(chunk) {
+        if (this.remainder.length) {
+            // see if we can release the last remainder
+            for (let i = 0; i < chunk.length; i++) {
+                let c = chunk[i];
+                if (c !== 0x0a && c !== 0x0d) {
+                    // found non-line terminator byte, can release previous chunk
+                    for (let remainderChunk of this.remainder) {
+                        this.updateBodyHash(remainderChunk);
+                    }
+                    this.remainder = [];
+                }
+            }
+        }
+        // find line terminators from the end of chunk
+        let matchStart = false;
+        for (let i = chunk.length - 1; i >= 0; i--) {
+            let c = chunk[i];
+            if (c === 0x0a || c === 0x0d) {
+                // stop looking
+                matchStart = i;
+            }
+            else {
+                break;
+            }
+        }
+        if (matchStart === 0) {
+            // nothing but newlines in this chunk
+            this.remainder.push(chunk);
+            return;
+        }
+        else if (matchStart !== false) {
+            this.remainder.push(chunk.subarray(matchStart));
+            chunk = chunk.subarray(0, matchStart);
+        }
+        this.updateBodyHash(chunk);
+        this.lastNewline = chunk[chunk.length - 1] === 0x0a;
+    }
+    digest(encoding) {
+        if (!this.lastNewline || !this.bodyHashedBytes) {
+            // emit empty line buffer to keep the stream flowing
+            this.updateBodyHash(Buffer.from('\r\n'));
+        }
+        return this.bodyHash.digest(encoding);
+    }
+}
+exports.SimpleHash = SimpleHash;
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/header/index.d.ts
+---
+
+import { Options, SignatureType, SigningHeaderLines } from '../dkim-verifier';
+export declare const generateCanonicalizedHeader: (type: SignatureType, signingHeaderLines: SigningHeaderLines, options: Options) => {
+    canonicalizedHeader: Buffer;
+    signatureHeaderLine: string;
+    dkimHeaderOpts: boolean | Record<string, any>;
+};
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/header/index.js
+---
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.generateCanonicalizedHeader = void 0;
+const relaxed_1 = require("./relaxed");
+const simple_1 = require("./simple");
+const generateCanonicalizedHeader = (type, signingHeaderLines, options) => {
+    options = options || {};
+    let canonicalization = (options.canonicalization || 'simple/simple')
+        .toString()
+        ?.split('/')
+        ?.shift()
+        ?.toLowerCase()
+        .trim();
+    switch (canonicalization) {
+        case 'simple':
+            return (0, simple_1.simpleHeaders)(type, signingHeaderLines, options);
+        case 'relaxed':
+            return (0, relaxed_1.relaxedHeaders)(type, signingHeaderLines, options);
+        default:
+            throw new Error('Unknown header canonicalization');
+    }
+};
+exports.generateCanonicalizedHeader = generateCanonicalizedHeader;
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/header/relaxed.d.ts
+---
+
+import type { Options, SignatureType, SigningHeaderLines } from '../dkim-verifier';
+export declare const relaxedHeaders: (type: SignatureType, signingHeaderLines: SigningHeaderLines, options: Options) => {
+    canonicalizedHeader: Buffer;
+    signatureHeaderLine: string;
+    dkimHeaderOpts: boolean | Record<string, unknown>;
+};
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/header/relaxed.js
+---
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.relaxedHeaders = void 0;
+const tools_1 = require("../tools");
+// generate headers for signing
+const relaxedHeaders = (type, signingHeaderLines, options) => {
+    let { signatureHeaderLine, signingDomain, selector, algorithm, canonicalization, bodyHash, signTime, signature, instance, bodyHashedBytes, } = options || {};
+    let chunks = [];
+    for (let signedHeaderLine of signingHeaderLines.headers) {
+        chunks.push((0, tools_1.formatRelaxedLine)(signedHeaderLine.line, '\r\n'));
+    }
+    let opts = false;
+    if (!signatureHeaderLine) {
+        opts = {
+            a: algorithm,
+            c: canonicalization,
+            s: selector,
+            d: signingDomain,
+            h: signingHeaderLines.keys,
+            bh: bodyHash,
+        };
+        if (typeof bodyHashedBytes === 'number') {
+            opts.l = bodyHashedBytes;
+        }
+        if (instance) {
+            // ARC only
+            opts.i = instance;
+        }
+        if (signTime) {
+            if (typeof signTime === 'string' || typeof signTime === 'number') {
+                signTime = new Date(signTime);
+            }
+            if (Object.prototype.toString.call(signTime) === '[object Date]' && signTime.toString() !== 'Invalid Date') {
+                // we need a unix timestamp value
+                signTime = Math.round(signTime.getTime() / 1000);
+                opts.t = signTime;
+            }
+        }
+        signatureHeaderLine = (0, tools_1.formatSignatureHeaderLine)(type, Object.assign({
+            // make sure that b= always has a value, otherwise folding would be different
+            b: signature || 'a'.repeat(73),
+        }, opts), true);
+    }
+    chunks.push(Buffer.from((0, tools_1.formatRelaxedLine)(signatureHeaderLine)
+        .toString('binary')
+        // remove value from b= key
+        .replace(/([;:\s]+b=)[^;]+/, '$1'), 'binary'));
+    return { canonicalizedHeader: Buffer.concat(chunks), signatureHeaderLine, dkimHeaderOpts: opts };
+};
+exports.relaxedHeaders = relaxedHeaders;
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/header/simple.d.ts
+---
+
+import type { Options, SignatureType, SigningHeaderLines } from '../dkim-verifier';
+export declare const simpleHeaders: (type: SignatureType, signingHeaderLines: SigningHeaderLines, options: Options) => {
+    canonicalizedHeader: Buffer;
+    signatureHeaderLine: string;
+    dkimHeaderOpts: boolean | Record<string, any>;
+};
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/header/simple.js
+---
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.simpleHeaders = void 0;
+const tools_1 = require("../tools");
+const formatSimpleLine = (line, suffix) => Buffer.from(line.toString('binary') + (suffix ? suffix : ''), 'binary');
+// generate headers for signing
+const simpleHeaders = (type, signingHeaderLines, options) => {
+    let { signatureHeaderLine, signingDomain, selector, algorithm, canonicalization, bodyHash, signTime, signature, instance, bodyHashedBytes, } = options || {};
+    let chunks = [];
+    for (let signedHeaderLine of signingHeaderLines.headers) {
+        chunks.push(formatSimpleLine(signedHeaderLine.line, '\r\n'));
+    }
+    let opts = false;
+    if (!signatureHeaderLine) {
+        opts = {
+            a: algorithm,
+            c: canonicalization,
+            s: selector,
+            d: signingDomain,
+            h: signingHeaderLines.keys,
+            bh: bodyHash,
+        };
+        if (typeof bodyHashedBytes === 'number') {
+            opts.l = bodyHashedBytes;
+        }
+        if (instance) {
+            // ARC only (should never happen thoug as simple algo is not allowed)
+            opts.i = instance;
+        }
+        if (signTime) {
+            if (typeof signTime === 'string' || typeof signTime === 'number') {
+                signTime = new Date(signTime);
+            }
+            if (Object.prototype.toString.call(signTime) === '[object Date]' && signTime.toString() !== 'Invalid Date') {
+                // we need a unix timestamp value
+                signTime = Math.round(signTime.getTime() / 1000);
+                opts.t = signTime;
+            }
+        }
+        signatureHeaderLine = (0, tools_1.formatSignatureHeaderLine)(type, Object.assign({
+            // make sure that b= has a value, otherwise folding would be different
+            b: signature || 'a'.repeat(73),
+        }, opts), true);
+    }
+    chunks.push(Buffer.from(formatSimpleLine(signatureHeaderLine)
+        .toString('binary')
+        // remove value from b= key
+        .replace(/([;:\s]+b=)[^;]+/, '$1'), 'binary'));
+    return { canonicalizedHeader: Buffer.concat(chunks), signatureHeaderLine, dkimHeaderOpts: opts };
+};
+exports.simpleHeaders = simpleHeaders;
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/dkim-verifier.d.ts
+---
+
+import { getSigningHeaderLines, parseDkimHeaders, parseHeaders } from './tools';
+import { MessageParser } from './message-parser';
+export type SignatureType = 'DKIM' | 'ARC' | 'AS';
+export type ParsedHeaders = ReturnType<typeof parseHeaders>;
+export type Parsed = ParsedHeaders['parsed'][0];
+export type ParseDkimHeaders = ReturnType<typeof parseDkimHeaders>;
+export type SigningHeaderLines = ReturnType<typeof getSigningHeaderLines>;
+export interface Options {
+    signatureHeaderLine: string;
+    signingDomain?: string;
+    selector?: string;
+    algorithm?: string;
+    canonicalization: string;
+    bodyHash?: string;
+    signTime?: string | number | Date;
+    signature?: string;
+    instance: string | boolean;
+    bodyHashedBytes?: string;
+}
+export declare class DkimVerifier extends MessageParser {
+    envelopeFrom: string | boolean;
+    headerFrom: string[];
+    results: {
+        [key: string]: any;
+    }[];
+    private options;
+    private resolver;
+    private minBitLength;
+    private signatureHeaders;
+    private bodyHashes;
+    private arc;
+    private seal;
+    private sealBodyHashKey;
+    constructor(options: Record<string, any>);
+    messageHeaders(headers: ParsedHeaders): Promise<void>;
+    nextChunk(chunk: Buffer): Promise<void>;
+    finalChunk(): Promise<void>;
+}
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/dkim-verifier.js
+---
+
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.DkimVerifier = void 0;
+const IS_BROWSER = typeof window !== 'undefined';
+// @ts-ignore
+const addressparser_1 = __importDefault(require("addressparser"));
+const crypto = __importStar(require("crypto"));
+const tools_1 = require("./tools");
+const message_parser_1 = require("./message-parser");
+const body_1 = require("./body");
+const header_1 = require("./header");
+class DkimVerifier extends message_parser_1.MessageParser {
+    constructor(options) {
+        super();
+        this.sealBodyHashKey = '';
+        this.options = options || {};
+        this.resolver = this.options.resolver;
+        this.minBitLength = this.options.minBitLength;
+        this.results = [];
+        this.signatureHeaders = [];
+        this.bodyHashes = new Map();
+        this.headerFrom = [];
+        this.envelopeFrom = false;
+        // ARC verification info
+        this.arc = { chain: false };
+        // should we also seal this message using ARC
+        this.seal = this.options.seal;
+        if (this.seal) {
+            // calculate body hash for the seal
+            let bodyCanon = 'relaxed';
+            let hashAlgo = 'sha256';
+            this.sealBodyHashKey = `${bodyCanon}:${hashAlgo}:`;
+            this.bodyHashes.set(this.sealBodyHashKey, (0, body_1.dkimBody)(bodyCanon, hashAlgo, 0));
+        }
+    }
+    async messageHeaders(headers) {
+        this.headers = headers;
+        this.signatureHeaders = headers.parsed
+            .filter((h) => h.key === 'dkim-signature')
+            .map((h) => {
+            const value = (0, tools_1.parseDkimHeaders)(h.line);
+            value.type = 'DKIM';
+            return value;
+        });
+        let fromHeaders = headers?.parsed?.filter((h) => h.key === 'from');
+        for (const fromHeader of fromHeaders) {
+            let fromHeaderString = fromHeader.line.toString();
+            let splitterPos = fromHeaderString.indexOf(':');
+            if (splitterPos >= 0) {
+                fromHeaderString = fromHeaderString.substr(splitterPos + 1);
+            }
+            let from = (0, addressparser_1.default)(fromHeaderString.trim());
+            for (let addr of from) {
+                if (addr && addr.address) {
+                    this.headerFrom.push(addr.address);
+                }
+            }
+        }
+        if (this.options.sender) {
+            let returnPath = (0, addressparser_1.default)(this.options.sender);
+            this.envelopeFrom = returnPath.length && returnPath[0].address ? returnPath[0].address : false;
+        }
+        else {
+            let returnPathHeader = headers.parsed.filter((h) => h.key === 'return-path').pop();
+            if (returnPathHeader) {
+                let returnPathHeaderString = returnPathHeader.line.toString();
+                let splitterPos = returnPathHeaderString.indexOf(':');
+                if (splitterPos >= 0) {
+                    returnPathHeaderString = returnPathHeaderString.substr(splitterPos + 1);
+                }
+                let returnPath = (0, addressparser_1.default)(returnPathHeaderString.trim());
+                this.envelopeFrom = returnPath.length && returnPath[0].address ? returnPath[0].address : false;
+            }
+        }
+        for (let signatureHeader of this.signatureHeaders) {
+            signatureHeader.algorithm = signatureHeader.parsed?.a?.value || '';
+            signatureHeader.signAlgo = signatureHeader.algorithm.split('-').shift().toLowerCase().trim();
+            signatureHeader.hashAlgo = signatureHeader.algorithm.split('-').pop().toLowerCase().trim();
+            signatureHeader.canonicalization = signatureHeader.parsed?.c?.value || '';
+            signatureHeader.headerCanon =
+                signatureHeader.canonicalization.split('/').shift().toLowerCase().trim() || 'simple';
+            // if body canonicalization is not set, then defaults to 'simple'
+            signatureHeader.bodyCanon = (signatureHeader.canonicalization.split('/')[1] || 'simple').toLowerCase().trim();
+            signatureHeader.signingDomain = signatureHeader.parsed?.d?.value || '';
+            signatureHeader.selector = signatureHeader.parsed?.s?.value || '';
+            signatureHeader.maxBodyLength =
+                signatureHeader.parsed?.l?.value && !isNaN(signatureHeader.parsed?.l?.value)
+                    ? signatureHeader.parsed?.l?.value
+                    : '';
+            const validSignAlgo = ['rsa', 'ed25519'];
+            const validHeaderAlgo = signatureHeader.type === 'DKIM' ? ['sha256', 'sha1'] : ['sha256'];
+            const validHeaderCanon = signatureHeader.type !== 'AS' ? ['relaxed', 'simple'] : ['relaxed'];
+            const validBodyCanon = signatureHeader.type !== 'AS' ? ['relaxed', 'simple'] : ['relaxed'];
+            if (!validSignAlgo.includes(signatureHeader.signAlgo) ||
+                !validHeaderAlgo.includes(signatureHeader.hashAlgo) ||
+                !validHeaderCanon.includes(signatureHeader.headerCanon) ||
+                !validBodyCanon.includes(signatureHeader.bodyCanon) ||
+                !signatureHeader.signingDomain ||
+                !signatureHeader.selector) {
+                signatureHeader.skip = true;
+                continue;
+            }
+            signatureHeader.bodyHashKey = [
+                signatureHeader.bodyCanon,
+                signatureHeader.hashAlgo,
+                signatureHeader.maxBodyLength,
+            ].join(':');
+            if (!this.bodyHashes.has(signatureHeader.bodyHashKey)) {
+                this.bodyHashes.set(signatureHeader.bodyHashKey, (0, body_1.dkimBody)(signatureHeader.bodyCanon, signatureHeader.hashAlgo, signatureHeader.maxBodyLength));
+            }
+        }
+    }
+    async nextChunk(chunk) {
+        for (let bodyHash of this.bodyHashes.values()) {
+            bodyHash.update(chunk);
+        }
+    }
+    async finalChunk() {
+        try {
+            if (!this.headers || !this.bodyHashes.size) {
+                return;
+            }
+            // convert bodyHashes from hash objects to base64 strings
+            for (let [key, bodyHash] of this.bodyHashes.entries()) {
+                this.bodyHashes.get(key).hash = bodyHash.digest('base64');
+            }
+            for (let signatureHeader of this.signatureHeaders) {
+                if (signatureHeader.skip) {
+                    // TODO: add failing header line?
+                    continue;
+                }
+                let signingHeaderLines = (0, tools_1.getSigningHeaderLines)(this.headers.parsed, signatureHeader.parsed?.h?.value, true);
+                let { canonicalizedHeader } = (0, header_1.generateCanonicalizedHeader)(signatureHeader.type, signingHeaderLines, {
+                    signatureHeaderLine: signatureHeader.original,
+                    canonicalization: signatureHeader.canonicalization,
+                    instance: ['ARC', 'AS'].includes(signatureHeader.type) ? signatureHeader.parsed?.i?.value : false,
+                });
+                let signingHeaders = {
+                    keys: signingHeaderLines.keys,
+                    headers: signingHeaderLines.headers.map((l) => l.line.toString()),
+                };
+                let publicKey, rr, modulusLength;
+                let status = {
+                    result: 'neutral',
+                    comment: false,
+                    // ptype properties
+                    header: {
+                        // signing domain
+                        i: signatureHeader.signingDomain ? `@${signatureHeader.signingDomain}` : false,
+                        // dkim selector
+                        s: signatureHeader.selector,
+                        // algo
+                        a: signatureHeader.parsed?.a?.value,
+                        // signature value
+                        b: signatureHeader.parsed?.b?.value ? `${signatureHeader.parsed?.b?.value.substr(0, 8)}` : false,
+                    },
+                };
+                if (signatureHeader.type === 'DKIM' && this.headerFrom?.length) {
+                    status.aligned = this.headerFrom?.length
+                        ? (0, tools_1.getAlignment)(this.headerFrom[0] ?? ''.split('@')?.pop(), [signatureHeader.signingDomain])
+                        : false;
+                }
+                let bodyHashObj = this.bodyHashes.get(signatureHeader.bodyHashKey);
+                let bodyHash = bodyHashObj?.hash;
+                if (signatureHeader.parsed?.bh?.value !== bodyHash) {
+                    status.result = 'neutral';
+                    status.comment = `body hash did not verify`;
+                }
+                else {
+                    try {
+                        let res = await (0, tools_1.getPublicKey)(signatureHeader.type, `${signatureHeader.selector}._domainkey.${signatureHeader.signingDomain}`, this.minBitLength, this.resolver);
+                        publicKey = res?.publicKey;
+                        rr = res?.rr;
+                        modulusLength = res?.modulusLength;
+                        try {
+                            let ver_result = false;
+                            if (!IS_BROWSER) {
+                                ver_result = crypto.verify(signatureHeader.signAlgo === 'rsa' ? signatureHeader.algorithm : null, canonicalizedHeader, publicKey, Buffer.from(signatureHeader.parsed?.b?.value, 'base64'));
+                            }
+                            else {
+                                let ver = crypto.createVerify('RSA-SHA256');
+                                ver.update(canonicalizedHeader);
+                                ver_result = ver.verify({ key: publicKey.toString(), format: 'pem' }, Buffer.from(signatureHeader.parsed?.b?.value, 'base64'));
+                            }
+                            status.signedHeaders = canonicalizedHeader;
+                            status.result = ver_result ? 'pass' : 'fail';
+                            if (status?.result === 'fail') {
+                                status.comment = 'bad signature';
+                            }
+                        }
+                        catch (err) {
+                            status.comment = err.message;
+                            status.result = 'neutral';
+                        }
+                    }
+                    catch (err) {
+                        if (err.rr) {
+                            rr = err.rr;
+                        }
+                        switch (err.code) {
+                            case 'ENOTFOUND':
+                            case 'ENODATA':
+                                status.result = 'neutral';
+                                status.comment = `no key`;
+                                break;
+                            case 'EINVALIDVER':
+                                status.result = 'neutral';
+                                status.comment = `unknown key version`;
+                                break;
+                            case 'EINVALIDTYPE':
+                                status.result = 'neutral';
+                                status.comment = `unknown key type`;
+                                break;
+                            case 'EINVALIDVAL':
+                                status.result = 'neutral';
+                                status.comment = `invalid public key`;
+                                break;
+                            case 'ESHORTKEY':
+                                status.result = 'policy';
+                                if (!status.policy) {
+                                    status.policy = {};
+                                }
+                                status.policy['dkim-rules'] = `weak-key`;
+                                break;
+                            default:
+                                status.result = 'temperror';
+                                status.comment = `DNS failure: ${err.code || err.message}`;
+                        }
+                    }
+                }
+                signatureHeader.bodyHashedBytes = this.bodyHashes.get(signatureHeader.bodyHashKey)?.bodyHashedBytes;
+                if (typeof signatureHeader.maxBodyLength === 'number' &&
+                    signatureHeader.maxBodyLength !== signatureHeader.bodyHashedBytes) {
+                    status.result = 'fail';
+                    status.comment = `invalid body length ${signatureHeader.bodyHashedBytes}`;
+                }
+                let result = {
+                    signingDomain: signatureHeader.signingDomain,
+                    selector: signatureHeader.selector,
+                    signature: signatureHeader.parsed?.b?.value,
+                    algo: signatureHeader.parsed?.a?.value,
+                    format: signatureHeader.parsed?.c?.value,
+                    bodyHash,
+                    bodyHashExpecting: signatureHeader.parsed?.bh?.value,
+                    body: bodyHashObj?.fullBody,
+                    signingHeaders,
+                    status,
+                };
+                if (typeof signatureHeader.bodyHashedBytes === 'number') {
+                    result.canonBodyLength = signatureHeader.bodyHashedBytes;
+                }
+                if (typeof signatureHeader.maxBodyLength === 'number') {
+                    result.bodyLengthCount = signatureHeader.maxBodyLength;
+                }
+                if (publicKey) {
+                    result.publicKey = publicKey.toString();
+                }
+                if (modulusLength) {
+                    result.modulusLength = modulusLength;
+                }
+                if (rr) {
+                    result.rr = rr;
+                }
+                if (typeof result.status.comment === 'boolean') {
+                    delete result.status.comment;
+                }
+                switch (signatureHeader.type) {
+                    case 'ARC':
+                        throw Error('ARC not possible');
+                        break;
+                    case 'DKIM':
+                    default:
+                        this.results.push(result);
+                        break;
+                }
+            }
+        }
+        finally {
+            if (!this.results.length) {
+                this.results.push({
+                    status: {
+                        result: 'none',
+                        comment: 'message not signed',
+                    },
+                });
+            }
+            this.results.forEach((result) => {
+                result.info = (0, tools_1.formatAuthHeaderRow)('dkim', result.status);
+            });
+        }
+        if (this.seal &&
+            this.bodyHashes.has(this.sealBodyHashKey) &&
+            typeof this.bodyHashes.get(this.sealBodyHashKey)?.hash === 'string') {
+            this.seal.bodyHash = this.bodyHashes.get(this.sealBodyHashKey).hash;
+        }
+    }
+}
+exports.DkimVerifier = DkimVerifier;
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/message-parser.d.ts
+---
+
+import { Writable, WritableOptions } from 'stream';
+import type { ParsedHeaders } from './dkim-verifier';
+/**
+ * Class for separating header from body
+ *
+ * @class
+ * @extends Writable
+ */
+export declare class MessageParser extends Writable {
+    byteLength: number;
+    headers: ParsedHeaders | boolean;
+    private state;
+    private stateBytes;
+    private headerChunks;
+    private lastByte;
+    constructor(options?: WritableOptions);
+    nextChunk(...args: any): Promise<void>;
+    finalChunk(...args: any): Promise<void>;
+    messageHeaders(headers: ParsedHeaders): Promise<void>;
+    processChunk(chunk: Buffer): Promise<void>;
+    ensureLinebreaks(input: Buffer): Generator<Buffer, void, unknown>;
+    writeAsync(chunk: any, encoding: BufferEncoding): Promise<void>;
+    _write(chunk: any, encoding: BufferEncoding, callback: (error?: Error | null) => void): void;
+    finish(): Promise<void>;
+    _final(callback: (error?: Error | null) => void): void;
+}
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/message-parser.js
+---
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.MessageParser = void 0;
+// Calculates relaxed body hash for a message body stream
+const stream_1 = require("stream");
+const tools_1 = require("./tools");
+/**
+ * Class for separating header from body
+ *
+ * @class
+ * @extends Writable
+ */
+class MessageParser extends stream_1.Writable {
+    constructor(options) {
+        super(options);
+        this.lastByte = 0;
+        this.byteLength = 0;
+        this.state = 'header';
+        this.stateBytes = [];
+        this.headers = false;
+        this.headerChunks = [];
+    }
+    async nextChunk(...args) {
+        // Override in child class
+    }
+    async finalChunk(...args) {
+        // Override in child class
+    }
+    async messageHeaders(headers) {
+        // Override in child class
+    }
+    async processChunk(chunk) {
+        if (!chunk || !chunk.length) {
+            return;
+        }
+        if (this.state === 'header') {
+            // wait until we have found body part
+            for (let i = 0; i < chunk.length; i++) {
+                let c = chunk[i];
+                this.stateBytes.push(c);
+                if (this.stateBytes.length > 4) {
+                    this.stateBytes = this.stateBytes.slice(-4);
+                }
+                let b0 = this.stateBytes[this.stateBytes.length - 1];
+                let b1 = this.stateBytes.length > 1 && this.stateBytes[this.stateBytes.length - 2];
+                let b2 = this.stateBytes.length > 2 && this.stateBytes[this.stateBytes.length - 3];
+                if (b0 === 0x0a && (b1 === 0x0a || (b1 === 0x0d && b2 === 0x0a))) {
+                    // found header ending
+                    this.state = 'body';
+                    if (i === chunk.length - 1) {
+                        //end of chunk
+                        this.headerChunks.push(chunk);
+                        this.headers = (0, tools_1.parseHeaders)(Buffer.concat(this.headerChunks));
+                        await this.messageHeaders(this.headers);
+                        return;
+                    }
+                    this.headerChunks.push(chunk.subarray(0, i + 1));
+                    this.headers = (0, tools_1.parseHeaders)(Buffer.concat(this.headerChunks));
+                    await this.messageHeaders(this.headers);
+                    chunk = chunk.subarray(i + 1);
+                    break;
+                }
+            }
+        }
+        if (this.state !== 'body') {
+            this.headerChunks.push(chunk);
+            return;
+        }
+        await this.nextChunk(chunk);
+    }
+    *ensureLinebreaks(input) {
+        let pos = 0;
+        for (let i = 0; i < input.length; i++) {
+            let c = input[i];
+            if (c !== 0x0a) {
+                this.lastByte = c;
+            }
+            else if (this.lastByte !== 0x0d) {
+                // emit line break
+                let buf;
+                if (i === 0 || pos === i) {
+                    buf = Buffer.from('\r\n');
+                }
+                else {
+                    buf = Buffer.concat([input.subarray(pos, i), Buffer.from('\r\n')]);
+                }
+                yield buf;
+                pos = i + 1;
+            }
+        }
+        if (pos === 0) {
+            yield input;
+        }
+        else if (pos < input.length) {
+            let buf = input.subarray(pos);
+            yield buf;
+        }
+    }
+    async writeAsync(chunk, encoding) {
+        if (!chunk || !chunk.length) {
+            return;
+        }
+        if (typeof chunk === 'string') {
+            chunk = Buffer.from(chunk, encoding);
+        }
+        for (let partialChunk of this.ensureLinebreaks(chunk)) {
+            // separate chunk is emitted for every line that uses \n instead of \r\n
+            await this.processChunk(partialChunk);
+            this.byteLength += partialChunk.length;
+        }
+    }
+    _write(chunk, encoding, callback) {
+        this.writeAsync(chunk, encoding)
+            .then(() => callback())
+            .catch((err) => callback(err));
+    }
+    async finish() {
+        // generate final hash and emit it
+        await this.finalChunk();
+        if (!this.headers && this.headerChunks.length) {
+            this.headers = (0, tools_1.parseHeaders)(Buffer.concat(this.headerChunks));
+            await this.messageHeaders(this.headers);
+        }
+    }
+    _final(callback) {
+        this.finish()
+            .then(() => callback())
+            .catch((err) => callback(err));
+    }
+}
+exports.MessageParser = MessageParser;
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/parse-dkim-headers.d.ts
+---
+
+declare const headerParser: (buf: Buffer | string) => {
+    parsed: {
+        [key: string]: any;
+    };
+    original: string | Buffer;
+};
+export default headerParser;
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/parse-dkim-headers.js
+---
+
+"use strict";
+// NB! fails to properly parse nested comments (should be rare enough though)
+Object.defineProperty(exports, "__esModule", { value: true });
+const valueParser = (str) => {
+    let line = str.replace(/\s+/g, ' ').trim();
+    let parts = [];
+    let lastState = false;
+    const createPart = () => {
+        let part = {
+            key: '',
+            value: '',
+        };
+        parts.push(part);
+        return part;
+    };
+    const parse = () => {
+        let state = 'key';
+        let escaped;
+        let quote;
+        let curPart = createPart();
+        for (let i = 0; i < line.length; i++) {
+            let c = line.charAt(i);
+            switch (state) {
+                // @ts-ignore
+                case 'key':
+                    if (c === '=') {
+                        state = 'value';
+                        break;
+                    }
+                // falls through
+                case 'value': {
+                    if (escaped === true) {
+                        curPart[state] += c;
+                        break;
+                    }
+                    switch (c) {
+                        case ' ':
+                            // start new part
+                            curPart = createPart();
+                            state = 'key';
+                            break;
+                        case '\\':
+                            escaped = true;
+                            break;
+                        case '"':
+                        case "'":
+                            lastState = state;
+                            state = 'quoted';
+                            quote = c;
+                            break;
+                        default:
+                            curPart[state] += c;
+                            break;
+                    }
+                    break;
+                }
+                case 'quoted':
+                    if (escaped === true && typeof lastState === 'string') {
+                        curPart[lastState] += c;
+                        break;
+                    }
+                    switch (c) {
+                        case '\\':
+                            escaped = true;
+                            break;
+                        case quote:
+                            state = lastState;
+                            break;
+                        default:
+                            if (typeof lastState === 'string') {
+                                curPart[lastState] += c;
+                            }
+                            break;
+                    }
+                    break;
+            }
+        }
+        let result = {
+            value: parts[0].key,
+        };
+        parts.slice(1).forEach((part) => {
+            if (part.key || part.value) {
+                let path = part.key.split('.');
+                let curRes = result;
+                let final = path.pop();
+                for (let p of path) {
+                    if (typeof curRes[p] !== 'object' || !curRes[p]) {
+                        curRes[p] = {};
+                    }
+                    curRes = curRes[p];
+                }
+                curRes[final ?? ''] = part.value;
+            }
+        });
+        return result;
+    };
+    return parse();
+};
+const headerParser = (buf) => {
+    let line = (buf || '').toString().trim();
+    let splitterPos = line.indexOf(':');
+    let headerKey;
+    if (splitterPos >= 0) {
+        headerKey = line.substr(0, splitterPos).trim().toLowerCase();
+        line = line.substr(splitterPos + 1).trim();
+    }
+    let parts = [];
+    let lastState = false;
+    const createPart = () => {
+        let part = {
+            key: '',
+            value: '',
+            comment: '',
+            hasValue: false,
+        };
+        parts.push(part);
+        return part;
+    };
+    const parse = () => {
+        let state = 'key';
+        let escaped;
+        let quote;
+        let curPart = createPart();
+        for (let i = 0; i < line.length; i++) {
+            let c = line.charAt(i);
+            switch (state) {
+                // @ts-ignore
+                case 'key':
+                    if (c === '=') {
+                        state = 'value';
+                        curPart.hasValue = true;
+                        break;
+                    }
+                // falls through
+                case 'value': {
+                    if (escaped === true) {
+                        curPart[state] += c;
+                    }
+                    switch (c) {
+                        case ';':
+                            // start new part
+                            curPart = createPart();
+                            state = 'key';
+                            break;
+                        case '\\':
+                            escaped = true;
+                            break;
+                        case '(':
+                            lastState = state;
+                            state = 'comment';
+                            break;
+                        case '"':
+                        case "'":
+                            lastState = state;
+                            curPart[state] += c;
+                            state = 'quoted';
+                            quote = c;
+                            break;
+                        default:
+                            curPart[state] += c;
+                            break;
+                    }
+                    break;
+                }
+                case 'comment':
+                    switch (c) {
+                        case '\\':
+                            escaped = true;
+                            break;
+                        case ')':
+                            state = lastState;
+                            break;
+                        default:
+                            curPart[state] += c;
+                            break;
+                    }
+                    break;
+                case 'quoted':
+                    switch (c) {
+                        case '\\':
+                            escaped = true;
+                            break;
+                        // @ts-ignore
+                        case quote:
+                            state = lastState;
+                        // falls through
+                        default:
+                            if (typeof lastState === 'string') {
+                                curPart[lastState] += c;
+                            }
+                            break;
+                    }
+                    break;
+            }
+        }
+        for (let i = parts.length - 1; i >= 0; i--) {
+            for (let key of Object.keys(parts[i])) {
+                if (typeof parts[i][key] === 'string') {
+                    parts[i][key] = parts[i][key].replace(/\s+/g, ' ').trim();
+                }
+            }
+            parts[i].key = parts[i].key.toLowerCase();
+            if (!parts[i].key) {
+                // remove empty value
+                parts.splice(i, 1);
+            }
+            else if (['bh', 'b', 'p', 'h'].includes(parts[i].key)) {
+                // remove unneeded whitespace
+                parts[i].value = parts[i].value?.replace(/\s+/g, '');
+            }
+            else if (['l', 'v', 't'].includes(parts[i].key) && !isNaN(parts[i].value)) {
+                parts[i].value = Number(parts[i].value);
+            }
+            else if (parts[i].key === 'i' && /^arc-/i.test(headerKey)) {
+                parts[i].value = Number(parts[i].value);
+            }
+        }
+        let result = {
+            header: headerKey,
+        };
+        for (let i = 0; i < parts.length; i++) {
+            // find the first entry with key only and use it as the default value
+            if (parts[i].key && !parts[i].hasValue) {
+                result.value = parts[i].key;
+                parts.splice(i, 1);
+                break;
+            }
+        }
+        parts.forEach((part) => {
+            let entry = {
+                value: part.value,
+            };
+            if (['arc-authentication-results', 'authentication-results'].includes(headerKey) &&
+                typeof part.value === 'string') {
+                // parse value into subparts as well
+                entry = Object.assign(entry, valueParser(entry.value));
+            }
+            if (part.comment) {
+                entry.comment = part.comment;
+            }
+            if (['arc-authentication-results', 'authentication-results'].includes(headerKey) && part.key === 'dkim') {
+                if (!result[part.key]) {
+                    result[part.key] = [];
+                }
+                if (Array.isArray(result[part.key])) {
+                    result[part.key].push(entry);
+                }
+            }
+            else {
+                result[part.key] = entry;
+            }
+        });
+        return result;
+    };
+    return { parsed: parse(), original: buf };
+};
+exports.default = headerParser;
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/tools.d.ts
+---
+
+import parseDkimHeaders from './parse-dkim-headers';
+import { DkimVerifier } from './dkim-verifier';
+import type { Parsed, SignatureType } from './dkim-verifier';
+export declare const defaultDKIMFieldNames: string;
+export declare const writeToStream: (stream: DkimVerifier, input: Buffer & {
+    pipe: (...args: any) => void;
+    on: (...args: any) => void;
+}, chunkSize?: number) => Promise<unknown>;

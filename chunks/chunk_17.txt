@@ -1,0 +1,2500 @@
+            // corresponding driver method until localForage is ready. These stubs
+            // will be replaced by the driver methods as soon as the driver is
+            // loaded, so there is no performance impact.
+            for (var i = 0, len = LibraryMethods.length; i < len; i++) {
+                callWhenReady(this, LibraryMethods[i]);
+            }
+        };
+
+        LocalForage.prototype.createInstance = function createInstance(options) {
+            return new LocalForage(options);
+        };
+
+        return LocalForage;
+    }();
+
+    // The actual localForage object that we expose as a module or via a
+    // global. It's extended by pulling in one of our other libraries.
+
+
+    var localforage_js = new LocalForage();
+
+    module.exports = localforage_js;
+
+    },{"3":3}]},{},[4])(4)
+    });
+    });
+
+    // Each section is its own file.
+
+    function sectionName(sectionId) {
+        return String.fromCharCode('a'.charCodeAt(0) + sectionId);
+    }
+
+    async function startWriteSectionFile(zkeyName, sectionId) {
+    	const fd = await createBinFile(zkeyName + sectionName(sectionId), "zky" + sectionName(sectionId), 1, 1, 1<<22, 1<<24);
+
+    	fd.writingSection = {
+            pSectionSize: fd.pos
+        };
+    	await fd.writeULE64(0); // Temporally set to 0 length
+    	return fd;
+    }
+
+    async function endWriteSectionFile(fd) {
+        if (typeof fd.writingSection === "undefined") throw new Error("Not writing a section");
+
+        const sectionSize = fd.pos - fd.writingSection.pSectionSize - 8;
+        const oldPos = fd.pos;
+        fd.pos = fd.writingSection.pSectionSize;
+        await fd.writeULE64(sectionSize);
+        fd.pos = oldPos;
+        await fd.close();
+        delete fd.writingSection;
+    }
+
+    async function startReadSectionFile(zkeyName, sectionId, maxVersion) {
+    	const fileName = zkeyName + sectionName(sectionId);
+    	const type = "zky" + sectionName(sectionId);
+        const item = await localforage.getItem(
+          fileName
+        );
+        const fd = await readExisting(new Uint8Array(item));
+
+        const b = await fd.read(4);
+        let readedType = "";
+        for (let i=0; i<4; i++) readedType += String.fromCharCode(b[i]);
+
+        if (readedType != type) throw new Error(fileName + ": Invalid File format");
+
+        let v = await fd.readULE32();
+
+        if (v>maxVersion) throw new Error("Version not supported");
+
+        let nSections = await fd.readULE32();
+        if (nSections != 1) throw new Error("More than one section found");
+
+        let size = await fd.readULE64();
+        fd.readingSection = {
+        	size: size,
+        	p: fd.pos,
+        };
+        return fd;
+    }
+
+    async function endReadSectionFile(fd, noCheck) {
+        if (typeof fd.readingSection === "undefined") throw new Error("Not reading a section");
+        if (!noCheck) {
+            if (fd.pos-fd.readingSection.p !=  fd.readingSection.size) throw new Error("Invalid section size reading");
+        }
+        await fd.close();
+        delete fd.readingSection;
+    }
+
+    async function readSectionFile(zkeyName, sectionId, maxVersion) {
+    	const fd = await startReadSectionFile(zkeyName, sectionId, maxVersion);
+        let buff;
+        if (fd.readingSection.size < (1 << 30) ) {
+            buff = new Uint8Array(fd.readingSection.size);
+        } else {
+            buff = new BigBuffer(fd.readingSection.size);
+        }
+
+        await fd.readToBuffer(buff, 0, fd.readingSection.size, fd.pos);
+        await endReadSectionFile(fd);
+        return buff;
+    }
+
+    async function copySectionFile(zkeyNameOld, zkeyNameNew, sectionId) {
+        await fs.copyFile(zkeyNameOld + sectionName(sectionId), zkeyNameNew + sectionName(sectionId), (err) => {
+            if (err) throw err;
+        });
+    }
+
+    async function sectionFileIsEqual(zkeyNameOld, zkeyNameNew, sectionId, maxVersion) {
+        const fdOld = await startReadSectionFile(zkeyNameOld, sectionId, maxVersion);
+        const fdNew = await startReadSectionFile(zkeyNameNew, sectionId, maxVersion);
+
+        const MAX_BUFF_SIZE = fdOld.pageSize * 16;
+        if (fdOld.readingSection.size != fdNew.readingSection.size) return false;
+        const totalBytes=fdOld.readingSection.size;
+        for (let i=0; i<totalBytes; i+= MAX_BUFF_SIZE) {
+            const n = Math.min(totalBytes-i, MAX_BUFF_SIZE);
+            const buff1 = await fdOld.read(n);
+            const buff2 = await fdNew.read(n);
+            for (let j=0; j<n; j++) if (buff1[j] != buff2[j]) return false;
+        }
+        await endReadSectionFile(fdOld);
+        await endReadSectionFile(fdNew);
+        return true;
+    }
+
+    Scalar.e("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001", 16);
+    Scalar.e("21888242871839275222246405745257275088548364400416034343698204186575808495617");
+
+    const bls12381q = Scalar.e("1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab", 16);
+    const bn128q = Scalar.e("21888242871839275222246405745257275088696311157297823662689037894645226208583");
+
+    async function getCurveFromQ(q) {
+        let curve;
+        if (Scalar.eq(q, bn128q)) {
+            curve = await buildBn128(true);
+        } else if (Scalar.eq(q, bls12381q)) {
+            curve = await buildBls12381();
+        } else {
+            throw new Error(`Curve not supported: ${Scalar.toString(q)}`);
+        }
+        return curve;
+    }
+
+    async function getCurveFromName(name) {
+        let curve;
+        const normName = normalizeName(name);
+        if (["BN128", "BN254", "ALTBN128"].indexOf(normName) >= 0) {
+            curve = await buildBn128();
+        } else if (["BLS12381"].indexOf(normName) >= 0) {
+            curve = await buildBls12381();
+        } else {
+            throw new Error(`Curve not supported: ${name}`);
+        }
+        return curve;
+
+        function normalizeName(n) {
+            return n.toUpperCase().match(/[A-Za-z0-9]+/g).join("");
+        }
+
+    }
+
+    var nanoassert = assert;
+
+    class AssertionError extends Error {}
+    AssertionError.prototype.name = 'AssertionError';
+
+    /**
+     * Minimal assert function
+     * @param  {any} t Value to check if falsy
+     * @param  {string=} m Optional assertion error message
+     * @throws {AssertionError}
+     */
+    function assert (t, m) {
+      if (!t) {
+        var err = new AssertionError(m);
+        if (Error.captureStackTrace) Error.captureStackTrace(err, assert);
+        throw err
+      }
+    }
+
+    function byteLength$5 (string) {
+      return string.length
+    }
+
+    function toString$5 (buffer) {
+      const len = buffer.byteLength;
+
+      let result = '';
+
+      for (let i = 0; i < len; i++) {
+        result += String.fromCharCode(buffer[i]);
+      }
+
+      return result
+    }
+
+    function write$6 (buffer, string, offset = 0, length = byteLength$5(string)) {
+      const len = Math.min(length, buffer.byteLength - offset);
+
+      for (let i = 0; i < len; i++) {
+        buffer[offset + i] = string.charCodeAt(i);
+      }
+
+      return len
+    }
+
+    var ascii = {
+      byteLength: byteLength$5,
+      toString: toString$5,
+      write: write$6
+    };
+
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+    const codes = new Uint8Array(256);
+
+    for (let i = 0; i < alphabet.length; i++) {
+      codes[alphabet.charCodeAt(i)] = i;
+    }
+
+    codes[/* - */ 0x2d] = 62;
+    codes[/* _ */ 0x5f] = 63;
+
+    function byteLength$4 (string) {
+      let len = string.length;
+
+      if (string.charCodeAt(len - 1) === 0x3d) len--;
+      if (len > 1 && string.charCodeAt(len - 1) === 0x3d) len--;
+
+      return (len * 3) >>> 2
+    }
+
+    function toString$4 (buffer) {
+      const len = buffer.byteLength;
+
+      let result = '';
+
+      for (let i = 0; i < len; i += 3) {
+        result += (
+          alphabet[buffer[i] >> 2] +
+          alphabet[((buffer[i] & 3) << 4) | (buffer[i + 1] >> 4)] +
+          alphabet[((buffer[i + 1] & 15) << 2) | (buffer[i + 2] >> 6)] +
+          alphabet[buffer[i + 2] & 63]
+        );
+      }
+
+      if (len % 3 === 2) {
+        result = result.substring(0, result.length - 1) + '=';
+      } else if (len % 3 === 1) {
+        result = result.substring(0, result.length - 2) + '==';
+      }
+
+      return result
+    }
+    function write$5 (buffer, string, offset = 0, length = byteLength$4(string)) {
+      const len = Math.min(length, buffer.byteLength - offset);
+
+      for (let i = 0, j = 0; i < len; i += 4) {
+        const a = codes[string.charCodeAt(i)];
+        const b = codes[string.charCodeAt(i + 1)];
+        const c = codes[string.charCodeAt(i + 2)];
+        const d = codes[string.charCodeAt(i + 3)];
+
+        buffer[j++] = (a << 2) | (b >> 4);
+        buffer[j++] = ((b & 15) << 4) | (c >> 2);
+        buffer[j++] = ((c & 3) << 6) | (d & 63);
+      }
+
+      return len
+    }
+    var base64 = {
+      byteLength: byteLength$4,
+      toString: toString$4,
+      write: write$5
+    };
+
+    function byteLength$3 (string) {
+      return string.length >>> 1
+    }
+
+    function toString$3 (buffer) {
+      const len = buffer.byteLength;
+
+      buffer = new DataView(buffer.buffer, buffer.byteOffset, len);
+
+      let result = '';
+      let i = 0;
+
+      for (let n = len - (len % 4); i < n; i += 4) {
+        result += buffer.getUint32(i).toString(16).padStart(8, '0');
+      }
+
+      for (; i < len; i++) {
+        result += buffer.getUint8(i).toString(16).padStart(2, '0');
+      }
+
+      return result
+    }
+
+    function write$4 (buffer, string, offset = 0, length = byteLength$3(string)) {
+      const len = Math.min(length, buffer.byteLength - offset);
+
+      for (let i = 0; i < len; i++) {
+        const a = hexValue(string.charCodeAt(i * 2));
+        const b = hexValue(string.charCodeAt(i * 2 + 1));
+
+        if (a === undefined || b === undefined) {
+          return buffer.subarray(0, i)
+        }
+
+        buffer[offset + i] = (a << 4) | b;
+      }
+
+      return len
+    }
+
+    var hex = {
+      byteLength: byteLength$3,
+      toString: toString$3,
+      write: write$4
+    };
+
+    function hexValue (char) {
+      if (char >= 0x30 && char <= 0x39) return char - 0x30
+      if (char >= 0x41 && char <= 0x46) return char - 0x41 + 10
+      if (char >= 0x61 && char <= 0x66) return char - 0x61 + 10
+    }
+
+    function byteLength$2 (string) {
+      let length = 0;
+
+      for (let i = 0, n = string.length; i < n; i++) {
+        const code = string.charCodeAt(i);
+
+        if (code >= 0xd800 && code <= 0xdbff && i + 1 < n) {
+          const code = string.charCodeAt(i + 1);
+
+          if (code >= 0xdc00 && code <= 0xdfff) {
+            length += 4;
+            i++;
+            continue
+          }
+        }
+
+        if (code <= 0x7f) length += 1;
+        else if (code <= 0x7ff) length += 2;
+        else length += 3;
+      }
+
+      return length
+    }
+
+    let toString$2;
+
+    if (typeof TextDecoder !== 'undefined') {
+      const decoder = new TextDecoder();
+
+      toString$2 = function toString (buffer) {
+        return decoder.decode(buffer)
+      };
+    } else {
+      toString$2 = function toString (buffer) {
+        const len = buffer.byteLength;
+
+        let output = '';
+        let i = 0;
+
+        while (i < len) {
+          let byte = buffer[i];
+
+          if (byte <= 0x7f) {
+            output += String.fromCharCode(byte);
+            i++;
+            continue
+          }
+
+          let bytesNeeded = 0;
+          let codePoint = 0;
+
+          if (byte <= 0xdf) {
+            bytesNeeded = 1;
+            codePoint = byte & 0x1f;
+          } else if (byte <= 0xef) {
+            bytesNeeded = 2;
+            codePoint = byte & 0x0f;
+          } else if (byte <= 0xf4) {
+            bytesNeeded = 3;
+            codePoint = byte & 0x07;
+          }
+
+          if (len - i - bytesNeeded > 0) {
+            let k = 0;
+
+            while (k < bytesNeeded) {
+              byte = buffer[i + k + 1];
+              codePoint = (codePoint << 6) | (byte & 0x3f);
+              k += 1;
+            }
+          } else {
+            codePoint = 0xfffd;
+            bytesNeeded = len - i;
+          }
+
+          output += String.fromCodePoint(codePoint);
+          i += bytesNeeded + 1;
+        }
+
+        return output
+      };
+    }
+
+    let write$3;
+
+    if (typeof TextEncoder !== 'undefined') {
+      const encoder = new TextEncoder();
+
+      write$3 = function write (buffer, string, offset = 0, length = byteLength$2(string)) {
+        const len = Math.min(length, buffer.byteLength - offset);
+        encoder.encodeInto(string, buffer.subarray(offset, offset + len));
+        return len
+      };
+    } else {
+      write$3 = function write (buffer, string, offset = 0, length = byteLength$2(string)) {
+        const len = Math.min(length, buffer.byteLength - offset);
+
+        buffer = buffer.subarray(offset, offset + len);
+
+        let i = 0;
+        let j = 0;
+
+        while (i < string.length) {
+          const code = string.codePointAt(i);
+
+          if (code <= 0x7f) {
+            buffer[j++] = code;
+            i++;
+            continue
+          }
+
+          let count = 0;
+          let bits = 0;
+
+          if (code <= 0x7ff) {
+            count = 6;
+            bits = 0xc0;
+          } else if (code <= 0xffff) {
+            count = 12;
+            bits = 0xe0;
+          } else if (code <= 0x1fffff) {
+            count = 18;
+            bits = 0xf0;
+          }
+
+          buffer[j++] = bits | (code >> count);
+          count -= 6;
+
+          while (count >= 0) {
+            buffer[j++] = 0x80 | ((code >> count) & 0x3f);
+            count -= 6;
+          }
+
+          i += code >= 0x10000 ? 2 : 1;
+        }
+
+        return len
+      };
+    }
+
+    var utf8 = {
+      byteLength: byteLength$2,
+      toString: toString$2,
+      write: write$3
+    };
+
+    function byteLength$1 (string) {
+      return string.length * 2
+    }
+
+    function toString$1 (buffer) {
+      const len = buffer.byteLength;
+
+      let result = '';
+
+      for (let i = 0; i < len - 1; i += 2) {
+        result += String.fromCharCode(buffer[i] + (buffer[i + 1] * 256));
+      }
+
+      return result
+    }
+
+    function write$2 (buffer, string, offset = 0, length = byteLength$1(string)) {
+      const len = Math.min(length, buffer.byteLength - offset);
+
+      let units = len;
+
+      for (let i = 0; i < string.length; ++i) {
+        if ((units -= 2) < 0) break
+
+        const c = string.charCodeAt(i);
+        const hi = c >> 8;
+        const lo = c % 256;
+
+        buffer[offset + i * 2] = lo;
+        buffer[offset + i * 2 + 1] = hi;
+      }
+
+      return len
+    }
+
+    var utf16le = {
+      byteLength: byteLength$1,
+      toString: toString$1,
+      write: write$2
+    };
+
+    function codecFor (encoding) {
+      switch (encoding) {
+        case 'ascii':
+          return ascii
+        case 'base64':
+          return base64
+        case 'hex':
+          return hex
+        case 'utf8':
+        case 'utf-8':
+        case undefined:
+          return utf8
+        case 'ucs2':
+        case 'ucs-2':
+        case 'utf16le':
+        case 'utf-16le':
+          return utf16le
+        default:
+          throw new Error(`Unknown encoding: ${encoding}`)
+      }
+    }
+
+    function isBuffer (value) {
+      return value instanceof Uint8Array
+    }
+
+    function alloc (size, fill, encoding) {
+      const buffer = new Uint8Array(size);
+      if (fill !== undefined) fill(buffer, fill, 0, buffer.byteLength, encoding);
+      return buffer
+    }
+
+    function allocUnsafe (size) {
+      return new Uint8Array(size)
+    }
+
+    function allocUnsafeSlow (size) {
+      return new Uint8Array(size)
+    }
+
+    function byteLength (string, encoding) {
+      return codecFor(encoding).byteLength(string)
+    }
+
+    function compare (a, b) {
+      if (a === b) return 0
+
+      const len = Math.min(a.byteLength, b.byteLength);
+
+      a = new DataView(a.buffer, a.byteOffset, a.byteLength);
+      b = new DataView(b.buffer, b.byteOffset, b.byteLength);
+
+      let i = 0;
+
+      for (let n = len - (len % 4); i < n; i += 4) {
+        const x = a.getUint32(i);
+        const y = b.getUint32(i);
+        if (x < y) return -1
+        if (x > y) return 1
+      }
+
+      for (; i < len; i++) {
+        const x = a.getUint8(i);
+        const y = b.getUint8(i);
+        if (x < y) return -1
+        if (x > y) return 1
+      }
+
+      return a.byteLength > b.byteLength ? 1 : a.byteLength < b.byteLength ? -1 : 0
+    }
+
+    function concat (buffers, totalLength) {
+      if (totalLength === undefined) {
+        totalLength = buffers.reduce((len, buffer) => len + buffer.byteLength, 0);
+      }
+
+      const result = new Uint8Array(totalLength);
+
+      buffers.reduce(
+        (offset, buffer) => {
+          result.set(buffer, offset);
+          return offset + buffer.byteLength
+        },
+        0
+      );
+
+      return result
+    }
+
+    function copy (source, target, targetStart = 0, start = 0, end = source.byteLength) {
+      if (end > 0 && end < start) return 0
+      if (end === start) return 0
+      if (source.byteLength === 0 || target.byteLength === 0) return 0
+
+      if (targetStart < 0) throw new RangeError('targetStart is out of range')
+      if (start < 0 || start >= source.byteLength) throw new RangeError('sourceStart is out of range')
+      if (end < 0) throw new RangeError('sourceEnd is out of range')
+
+      if (targetStart >= target.byteLength) targetStart = target.byteLength;
+      if (end > source.byteLength) end = source.byteLength;
+      if (target.byteLength - targetStart < end - start) {
+        end = target.length - targetStart + start;
+      }
+
+      const len = end - start;
+
+      if (source === target) {
+        target.copyWithin(targetStart, start, end);
+      } else {
+        target.set(source.subarray(start, end), targetStart);
+      }
+
+      return len
+    }
+
+    function equals (a, b) {
+      if (a === b) return true
+      if (a.byteLength !== b.byteLength) return false
+
+      const len = a.byteLength;
+
+      a = new DataView(a.buffer, a.byteOffset, a.byteLength);
+      b = new DataView(b.buffer, b.byteOffset, b.byteLength);
+
+      let i = 0;
+
+      for (let n = len - (len % 4); i < n; i += 4) {
+        if (a.getUint32(i) !== b.getUint32(i)) return false
+      }
+
+      for (; i < len; i++) {
+        if (a.getUint8(i) !== b.getUint8(i)) return false
+      }
+
+      return true
+    }
+
+    function fill (buffer, value, offset, end, encoding) {
+      if (typeof value === 'string') {
+        // fill(buffer, string, encoding)
+        if (typeof offset === 'string') {
+          encoding = offset;
+          offset = 0;
+          end = buffer.byteLength;
+
+        // fill(buffer, string, offset, encoding)
+        } else if (typeof end === 'string') {
+          encoding = end;
+          end = buffer.byteLength;
+        }
+      } else if (typeof val === 'number') {
+        value = value & 255;
+      } else if (typeof val === 'boolean') {
+        value = +value;
+      }
+
+      if (offset < 0 || buffer.byteLength < offset || buffer.byteLength < end) {
+        throw new RangeError('Out of range index')
+      }
+
+      if (offset === undefined) offset = 0;
+      if (end === undefined) end = buffer.byteLength;
+
+      if (end <= offset) return buffer
+
+      if (!value) value = 0;
+
+      if (typeof value === 'number') {
+        for (let i = offset; i < end; ++i) {
+          buffer[i] = value;
+        }
+      } else {
+        value = isBuffer(value) ? value : from(value, encoding);
+
+        const len = value.byteLength;
+
+        for (let i = 0; i < end - offset; ++i) {
+          buffer[i + offset] = value[i % len];
+        }
+      }
+
+      return buffer
+    }
+
+    function from (value, encodingOrOffset, length) {
+      // from(string, encoding)
+      if (typeof value === 'string') return fromString(value, encodingOrOffset)
+
+      // from(array)
+      if (Array.isArray(value)) return fromArray(value)
+
+      // from(buffer)
+      if (ArrayBuffer.isView(value)) return fromBuffer(value)
+
+      // from(arrayBuffer[, byteOffset[, length]])
+      return fromArrayBuffer(value, encodingOrOffset, length)
+    }
+
+    function fromString (string, encoding) {
+      const codec = codecFor(encoding);
+      const buffer = new Uint8Array(codec.byteLength(string));
+      codec.write(buffer, string, 0, buffer.byteLength);
+      return buffer
+    }
+
+    function fromArray (array) {
+      const buffer = new Uint8Array(array.length);
+      buffer.set(array);
+      return buffer
+    }
+
+    function fromBuffer (buffer) {
+      const copy = new Uint8Array(buffer.byteLength);
+      copy.set(buffer);
+      return copy
+    }
+
+    function fromArrayBuffer (arrayBuffer, byteOffset, length) {
+      return new Uint8Array(arrayBuffer, byteOffset, length)
+    }
+
+    function swap (buffer, n, m) {
+      const i = buffer[n];
+      buffer[n] = buffer[m];
+      buffer[m] = i;
+    }
+
+    function swap16 (buffer) {
+      const len = buffer.byteLength;
+
+      if (len % 2 !== 0) throw new RangeError('Buffer size must be a multiple of 16-bits')
+
+      for (let i = 0; i < len; i += 2) swap(buffer, i, i + 1);
+
+      return buffer
+    }
+
+    function swap32 (buffer) {
+      const len = buffer.byteLength;
+
+      if (len % 4 !== 0) throw new RangeError('Buffer size must be a multiple of 32-bits')
+
+      for (let i = 0; i < len; i += 4) {
+        swap(buffer, i, i + 3);
+        swap(buffer, i + 1, i + 2);
+      }
+
+      return buffer
+    }
+
+    function swap64 (buffer) {
+      const len = buffer.byteLength;
+
+      if (len % 8 !== 0) throw new RangeError('Buffer size must be a multiple of 64-bits')
+
+      for (let i = 0; i < len; i += 8) {
+        swap(buffer, i, i + 7);
+        swap(buffer, i + 1, i + 6);
+        swap(buffer, i + 2, i + 5);
+        swap(buffer, i + 3, i + 4);
+      }
+
+      return buffer
+    }
+
+    function toBuffer (buffer) {
+      return buffer
+    }
+
+    function toString (buffer, encoding, start = 0, end = buffer.byteLength) {
+      const len = buffer.byteLength;
+
+      if (start >= len) return ''
+      if (end <= start) return ''
+      if (start < 0) start = 0;
+      if (end > len) end = len;
+
+      if (start !== 0 || end < len) buffer = buffer.subarray(start, end);
+
+      return codecFor(encoding).toString(buffer)
+    }
+
+    function write$1 (buffer, string, offset, length, encoding) {
+      // write(buffer, string)
+      if (offset === undefined) {
+        encoding = 'utf8';
+
+      // write(buffer, string, encoding)
+      } else if (length === undefined && typeof offset === 'string') {
+        encoding = offset;
+        offset = undefined;
+
+      // write(buffer, string, offset, encoding)
+      } else if (encoding === undefined && typeof length === 'string') {
+        encoding = length;
+        length = undefined;
+      }
+
+      return codecFor(encoding).write(buffer, string, offset, length)
+    }
+
+    var browser = {
+      isBuffer,
+      alloc,
+      allocUnsafe,
+      allocUnsafeSlow,
+      byteLength,
+      compare,
+      concat,
+      copy,
+      equals,
+      fill,
+      from,
+      swap16,
+      swap32,
+      swap64,
+      toBuffer,
+      toString,
+      write: write$1
+    };
+
+    var __commonJS = (cb, mod) => function __require() {
+      return mod || (0, cb[Object.keys(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+    };
+    var __toBinary = /* @__PURE__ */ (() => {
+      var table = new Uint8Array(128);
+      for (var i = 0; i < 64; i++)
+        table[i < 26 ? i + 65 : i < 52 ? i + 71 : i < 62 ? i - 4 : i * 4 - 205] = i;
+      return (base64) => {
+        var n = base64.length, bytes2 = new Uint8Array((n - (base64[n - 1] == "=") - (base64[n - 2] == "=")) * 3 / 4 | 0);
+        for (var i2 = 0, j = 0; i2 < n; ) {
+          var c0 = table[base64.charCodeAt(i2++)], c1 = table[base64.charCodeAt(i2++)];
+          var c2 = table[base64.charCodeAt(i2++)], c3 = table[base64.charCodeAt(i2++)];
+          bytes2[j++] = c0 << 2 | c1 >> 4;
+          bytes2[j++] = c1 << 4 | c2 >> 2;
+          bytes2[j++] = c2 << 6 | c3;
+        }
+        return bytes2;
+      };
+    })();
+
+    // wasm-binary:./blake2b.wat
+    var require_blake2b = __commonJS({
+      "wasm-binary:./blake2b.wat"(exports2, module2) {
+        module2.exports = __toBinary("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");
+      }
+    });
+
+    // wasm-module:./blake2b.wat
+    var bytes = require_blake2b();
+    var compiled = WebAssembly.compile(bytes);
+    var blake2b = async (imports) => {
+      const instance = await WebAssembly.instantiate(await compiled, imports);
+      return instance.exports;
+    };
+
+    var blake2bWasm = createCommonjsModule(function (module) {
+    var wasm = null;
+    var wasmPromise = typeof WebAssembly !== "undefined" && blake2b().then(mod => {
+      wasm = mod;
+    });
+
+    var head = 64;
+    var freeList = [];
+
+    module.exports = Blake2b;
+    var BYTES_MIN = module.exports.BYTES_MIN = 16;
+    var BYTES_MAX = module.exports.BYTES_MAX = 64;
+    module.exports.BYTES = 32;
+    var KEYBYTES_MIN = module.exports.KEYBYTES_MIN = 16;
+    var KEYBYTES_MAX = module.exports.KEYBYTES_MAX = 64;
+    module.exports.KEYBYTES = 32;
+    var SALTBYTES = module.exports.SALTBYTES = 16;
+    var PERSONALBYTES = module.exports.PERSONALBYTES = 16;
+
+    function Blake2b (digestLength, key, salt, personal, noAssert) {
+      if (!(this instanceof Blake2b)) return new Blake2b(digestLength, key, salt, personal, noAssert)
+      if (!wasm) throw new Error('WASM not loaded. Wait for Blake2b.ready(cb)')
+      if (!digestLength) digestLength = 32;
+
+      if (noAssert !== true) {
+        nanoassert(digestLength >= BYTES_MIN, 'digestLength must be at least ' + BYTES_MIN + ', was given ' + digestLength);
+        nanoassert(digestLength <= BYTES_MAX, 'digestLength must be at most ' + BYTES_MAX + ', was given ' + digestLength);
+        if (key != null) {
+          nanoassert(key instanceof Uint8Array, 'key must be Uint8Array or Buffer');
+          nanoassert(key.length >= KEYBYTES_MIN, 'key must be at least ' + KEYBYTES_MIN + ', was given ' + key.length);
+          nanoassert(key.length <= KEYBYTES_MAX, 'key must be at least ' + KEYBYTES_MAX + ', was given ' + key.length);
+        }
+        if (salt != null) {
+          nanoassert(salt instanceof Uint8Array, 'salt must be Uint8Array or Buffer');
+          nanoassert(salt.length === SALTBYTES, 'salt must be exactly ' + SALTBYTES + ', was given ' + salt.length);
+        }
+        if (personal != null) {
+          nanoassert(personal instanceof Uint8Array, 'personal must be Uint8Array or Buffer');
+          nanoassert(personal.length === PERSONALBYTES, 'personal must be exactly ' + PERSONALBYTES + ', was given ' + personal.length);
+        }
+      }
+
+      if (!freeList.length) {
+        freeList.push(head);
+        head += 216;
+      }
+
+      this.digestLength = digestLength;
+      this.finalized = false;
+      this.pointer = freeList.pop();
+      this._memory = new Uint8Array(wasm.memory.buffer);
+
+      this._memory.fill(0, 0, 64);
+      this._memory[0] = this.digestLength;
+      this._memory[1] = key ? key.length : 0;
+      this._memory[2] = 1; // fanout
+      this._memory[3] = 1; // depth
+
+      if (salt) this._memory.set(salt, 32);
+      if (personal) this._memory.set(personal, 48);
+
+      if (this.pointer + 216 > this._memory.length) this._realloc(this.pointer + 216); // we need 216 bytes for the state
+      wasm.blake2b_init(this.pointer, this.digestLength);
+
+      if (key) {
+        this.update(key);
+        this._memory.fill(0, head, head + key.length); // whiteout key
+        this._memory[this.pointer + 200] = 128;
+      }
+    }
+
+    Blake2b.prototype._realloc = function (size) {
+      wasm.memory.grow(Math.max(0, Math.ceil(Math.abs(size - this._memory.length) / 65536)));
+      this._memory = new Uint8Array(wasm.memory.buffer);
+    };
+
+    Blake2b.prototype.update = function (input) {
+      nanoassert(this.finalized === false, 'Hash instance finalized');
+      nanoassert(input instanceof Uint8Array, 'input must be Uint8Array or Buffer');
+
+      if (head + input.length > this._memory.length) this._realloc(head + input.length);
+      this._memory.set(input, head);
+      wasm.blake2b_update(this.pointer, head, head + input.length);
+      return this
+    };
+
+    Blake2b.prototype.digest = function (enc) {
+      nanoassert(this.finalized === false, 'Hash instance finalized');
+      this.finalized = true;
+
+      freeList.push(this.pointer);
+      wasm.blake2b_final(this.pointer);
+
+      if (!enc || enc === 'binary') {
+        return this._memory.slice(this.pointer + 128, this.pointer + 128 + this.digestLength)
+      }
+
+      if (typeof enc === 'string') {
+        return browser.toString(this._memory, enc, this.pointer + 128, this.pointer + 128 + this.digestLength)
+      }
+
+      nanoassert(enc instanceof Uint8Array && enc.length >= this.digestLength, 'input must be Uint8Array or Buffer');
+      for (var i = 0; i < this.digestLength; i++) {
+        enc[i] = this._memory[this.pointer + 128 + i];
+      }
+
+      return enc
+    };
+
+    // libsodium compat
+    Blake2b.prototype.final = Blake2b.prototype.digest;
+
+    Blake2b.WASM = wasm;
+    Blake2b.SUPPORTED = typeof WebAssembly !== 'undefined';
+
+    Blake2b.ready = function (cb) {
+      if (!cb) cb = noop;
+      if (!wasmPromise) return cb(new Error('WebAssembly not supported'))
+      return wasmPromise.then(() => cb(), cb)
+    };
+
+    Blake2b.prototype.ready = Blake2b.ready;
+
+    Blake2b.prototype.getPartialHash = function () {
+      return this._memory.slice(this.pointer, this.pointer + 216);
+    };
+
+    Blake2b.prototype.setPartialHash = function (ph) {
+      this._memory.set(ph, this.pointer);
+    };
+
+    function noop () {}
+    });
+
+    /*
+        Copyright 2018 0KIMS association.
+
+        This file is part of snarkJS.
+
+        snarkJS is a free software: you can redistribute it and/or modify it
+        under the terms of the GNU General Public License as published by
+        the Free Software Foundation, either version 3 of the License, or
+        (at your option) any later version.
+
+        snarkJS is distributed in the hope that it will be useful, but WITHOUT
+        ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+        or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+        License for more details.
+
+        You should have received a copy of the GNU General Public License
+        along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+    */
+
+    const _revTable = [];
+    for (let i=0; i<256; i++) {
+        _revTable[i] = _revSlow(i, 8);
+    }
+
+    function _revSlow(idx, bits) {
+        let res =0;
+        let a = idx;
+        for (let i=0; i<bits; i++) {
+            res <<= 1;
+            res = res | (a &1);
+            a >>=1;
+        }
+        return res;
+    }
+
+
+    function log2( V )
+    {
+        return( ( ( V & 0xFFFF0000 ) !== 0 ? ( V &= 0xFFFF0000, 16 ) : 0 ) | ( ( V & 0xFF00FF00 ) !== 0 ? ( V &= 0xFF00FF00, 8 ) : 0 ) | ( ( V & 0xF0F0F0F0 ) !== 0 ? ( V &= 0xF0F0F0F0, 4 ) : 0 ) | ( ( V & 0xCCCCCCCC ) !== 0 ? ( V &= 0xCCCCCCCC, 2 ) : 0 ) | ( ( V & 0xAAAAAAAA ) !== 0 ) );
+    }
+
+
+    function formatHash(b, title) {
+        const a = new DataView(b.buffer, b.byteOffset, b.byteLength);
+        let S = "";
+        for (let i=0; i<4; i++) {
+            if (i>0) S += "\n";
+            S += "\t\t";
+            for (let j=0; j<4; j++) {
+                if (j>0) S += " ";
+                S += a.getUint32(i*16+j*4).toString(16).padStart(8, "0");
+            }
+        }
+        if (title) S = title + "\n" + S;
+        return S;
+    }
+
+    function hashIsEqual(h1, h2) {
+        if (h1.byteLength != h2.byteLength) return false;
+        var dv1 = new Int8Array(h1);
+        var dv2 = new Int8Array(h2);
+        for (var i = 0 ; i != h1.byteLength ; i++)
+        {
+            if (dv1[i] != dv2[i]) return false;
+        }
+        return true;
+    }
+
+    function cloneHasher(h) {
+        const ph = h.getPartialHash();
+        const res = blake2bWasm(64);
+        res.setPartialHash(ph);
+        return res;
+    }
+
+    async function sameRatio$2(curve, g1s, g1sx, g2s, g2sx) {
+        if (curve.G1.isZero(g1s)) return false;
+        if (curve.G1.isZero(g1sx)) return false;
+        if (curve.G2.isZero(g2s)) return false;
+        if (curve.G2.isZero(g2sx)) return false;
+        // return curve.F12.eq(curve.pairing(g1s, g2sx), curve.pairing(g1sx, g2s));
+        const res = await curve.pairingEq(g1s, g2sx, curve.G1.neg(g1sx), g2s);
+        return res;
+    }
+
+
+    function askEntropy() {
+        {
+            return window.prompt("Enter a random text. (Entropy): ", "");
+        }
+    }
+
+    async function getRandomRng(entropy) {
+        // Generate a random Rng
+        while (!entropy) {
+            entropy = await askEntropy();
+        }
+        const hasher = blake2bWasm(64);
+        hasher.update(crypto.randomBytes(64));
+        const enc = new TextEncoder(); // always utf-8
+        hasher.update(enc.encode(entropy));
+        const hash = Buffer.from(hasher.digest());
+
+        const seed = [];
+        for (let i=0;i<8;i++) {
+            seed[i] = hash.readUInt32BE(i*4);
+        }
+        const rng = new ChaCha(seed);
+        return rng;
+    }
+
+    function rngFromBeaconParams(beaconHash, numIterationsExp) {
+        let nIterationsInner;
+        let nIterationsOuter;
+        if (numIterationsExp<32) {
+            nIterationsInner = (1 << numIterationsExp) >>> 0;
+            nIterationsOuter = 1;
+        } else {
+            nIterationsInner = 0x100000000;
+            nIterationsOuter = (1 << (numIterationsExp-32)) >>> 0;
+        }
+
+        let curHash = beaconHash;
+        for (let i=0; i<nIterationsOuter; i++) {
+            for (let j=0; j<nIterationsInner; j++) {
+                curHash = crypto.createHash("sha256").update(curHash).digest();
+            }
+        }
+
+        const curHashV = new DataView(curHash.buffer, curHash.byteOffset, curHash.byteLength);
+        const seed = [];
+        for (let i=0; i<8; i++) {
+            seed[i] = curHashV.getUint32(i*4, false);
+        }
+
+        const rng = new ChaCha(seed);
+
+        return rng;
+    }
+
+    function hex2ByteArray(s) {
+        if (s instanceof Uint8Array) return s;
+        if (s.slice(0,2) == "0x") s= s.slice(2);
+        return new Uint8Array(s.match(/[\da-f]{2}/gi).map(function (h) {
+            return parseInt(h, 16);
+        }));
+    }
+
+    function byteArray2hex(byteArray) {
+        return Array.prototype.map.call(byteArray, function(byte) {
+            return ("0" + (byte & 0xFF).toString(16)).slice(-2);
+        }).join("");
+    }
+
+    /*
+        Copyright 2018 0KIMS association.
+
+        This file is part of snarkJS.
+
+        snarkJS is a free software: you can redistribute it and/or modify it
+        under the terms of the GNU General Public License as published by
+        the Free Software Foundation, either version 3 of the License, or
+        (at your option) any later version.
+
+        snarkJS is distributed in the hope that it will be useful, but WITHOUT
+        ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+        or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+        License for more details.
+
+        You should have received a copy of the GNU General Public License
+        along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+    */
+
+    async function writeHeader(zkeyName, zkey) {
+
+        // Write the header
+        ///////////
+        const fdSection1 = await startWriteSectionFile(zkeyName, 1);
+        await fdSection1.writeULE32(1); // Groth
+        await endWriteSectionFile(fdSection1);
+
+        // Write the Groth header section
+        ///////////
+
+        const curve = await getCurveFromQ(zkey.q);
+
+        const fdSection2 = await startWriteSectionFile(zkeyName, 2);
+        const primeQ = curve.q;
+        const n8q = (Math.floor( (Scalar.bitLength(primeQ) - 1) / 64) +1)*8;
+
+        const primeR = curve.r;
+        const n8r = (Math.floor( (Scalar.bitLength(primeR) - 1) / 64) +1)*8;
+
+        await fdSection2.writeULE32(n8q);
+        await writeBigInt(fdSection2, primeQ, n8q);
+        await fdSection2.writeULE32(n8r);
+        await writeBigInt(fdSection2, primeR, n8r);
+        await fdSection2.writeULE32(zkey.nVars);                         // Total number of bars
+        await fdSection2.writeULE32(zkey.nPublic);                       // Total number of public vars (not including ONE)
+        await fdSection2.writeULE32(zkey.domainSize);                  // domainSize
+        await writeG1(fdSection2, curve, zkey.vk_alpha_1);
+        await writeG1(fdSection2, curve, zkey.vk_beta_1);
+        await writeG2(fdSection2, curve, zkey.vk_beta_2);
+        await writeG2(fdSection2, curve, zkey.vk_gamma_2);
+        await writeG1(fdSection2, curve, zkey.vk_delta_1);
+        await writeG2(fdSection2, curve, zkey.vk_delta_2);
+
+        await endWriteSectionFile(fdSection2);
+    }
+
+    async function writeG1(fd, curve, p) {
+        const buff = new Uint8Array(curve.G1.F.n8*2);
+        curve.G1.toRprLEM(buff, 0, p);
+        await fd.write(buff);
+    }
+
+    async function writeG2(fd, curve, p) {
+        const buff = new Uint8Array(curve.G2.F.n8*2);
+        curve.G2.toRprLEM(buff, 0, p);
+        await fd.write(buff);
+    }
+
+    async function readG1(fd, curve, toObject) {
+        const buff = await fd.read(curve.G1.F.n8*2);
+        const res = curve.G1.fromRprLEM(buff, 0);
+        return toObject ? curve.G1.toObject(res) : res;
+    }
+
+    async function readG2(fd, curve, toObject) {
+        const buff = await fd.read(curve.G2.F.n8*2);
+        const res = curve.G2.fromRprLEM(buff, 0);
+        return toObject ? curve.G2.toObject(res) : res;
+    }
+
+
+    async function readHeader$1(zkeyFileName, maxZKeyVersion) {
+        // Read Header
+        /////////////////////
+        const fd = await startReadSectionFile(zkeyFileName, 1, maxZKeyVersion);
+        const protocolId = await fd.readULE32();
+        await endReadSectionFile(fd);
+
+        if (protocolId == 1) {
+            return await readHeaderGroth16(zkeyFileName, maxZKeyVersion);
+        } else {
+            throw new Error("Protocol not supported: ");
+        }        
+    }
+
+
+
+
+    async function readHeaderGroth16(zkeyFileName, maxZKeyVersion, toObject) {
+        const zkey = {};
+
+        zkey.protocol = "groth16";
+
+        // Read Groth Header
+        /////////////////////
+        const fd = await startReadSectionFile(zkeyFileName, 2, maxZKeyVersion);
+        const n8q = await fd.readULE32();
+        zkey.n8q = n8q;
+        zkey.q = await readBigInt(fd, n8q);
+
+        const n8r = await fd.readULE32();
+        zkey.n8r = n8r;
+        zkey.r = await readBigInt(fd, n8r);
+
+        let curve = await getCurveFromQ(zkey.q);
+
+        zkey.nVars = await fd.readULE32();
+        zkey.nPublic = await fd.readULE32();
+        zkey.domainSize = await fd.readULE32();
+        zkey.power = log2(zkey.domainSize);
+        zkey.vk_alpha_1 = await readG1(fd, curve, toObject);
+        zkey.vk_beta_1 = await readG1(fd, curve, toObject);
+        zkey.vk_beta_2 = await readG2(fd, curve, toObject);
+        zkey.vk_gamma_2 = await readG2(fd, curve, toObject);
+        zkey.vk_delta_1 = await readG1(fd, curve, toObject);
+        zkey.vk_delta_2 = await readG2(fd, curve, toObject);
+        await endReadSectionFile(fd);
+
+        return zkey;
+    }
+
+    async function readZKey(fileName, toObject) {
+        const maxZKeyVersion = 2;
+        // const {fd, sections} = await binFileUtils.readBinFile(fileName, "zkey", 1);
+
+        const zkey = await zkeyUtils.readHeader(zkeyFileName, maxZKeyVersion);
+
+        if (zkey.protocol != "groth16") {
+            throw new Error("zkey file is not groth16");
+        }
+
+        // const fd = await chunkFileUtils.startReadSectionFile(zkeyFileName, 1, maxZKeyVersion);
+        // const protocolId = await fd.readULE32();
+        // await chunkFileUtils.endReadSectionFile(fd);
+
+
+        const Fr = new F1Field(zkey.r);
+        const Rr = Scalar.mod(Scalar.shl(1, zkey.n8r*8), zkey.r);
+        const Rri = Fr.inv(Rr);
+        const Rri2 = Fr.mul(Rri, Rri);
+
+        let curve = await getCurveFromQ(zkey.q);
+
+        // Read IC Section
+        ///////////
+        const fd3 = await startReadSectionFile(zkeyFileName, 3, maxZKeyVersion);
+        zkey.IC = [];
+        for (let i=0; i<= zkey.nPublic; i++) {
+            const P = await readG1(fd3, curve, toObject);
+            zkey.IC.push(P);
+        }
+        await endReadSectionFile(fd3);
+
+        // Read Coefs
+        ///////////
+        const fd4 = await startReadSectionFile(zkeyFileName, 4, maxZKeyVersion);
+        const nCCoefs = await fd4.readULE32();
+        zkey.ccoefs = [];
+        for (let i=0; i<nCCoefs; i++) {
+            const m = await fd4.readULE32();
+            const c = await fd4.readULE32();
+            const s = await fd4.readULE32();
+            const v = await readFr2(fd4);
+            zkey.ccoefs.push({
+                matrix: m,
+                constraint: c,
+                signal: s,
+                value: v
+            });
+        }
+        await endReadSectionFile(fd4);
+
+        // Read A points
+        ///////////
+        const fd5 = await startReadSectionFile(zkeyFileName, 5, maxZKeyVersion);
+        zkey.A = [];
+        for (let i=0; i<zkey.nVars; i++) {
+            const A = await readG1(fd5, curve, toObject);
+            zkey.A[i] = A;
+        }
+        await endReadSectionFile(fd5);
+
+
+        // Read B1
+        ///////////
+        const fd6 = await startReadSectionFile(zkeyFileName, 6, maxZKeyVersion);
+        zkey.B1 = [];
+        for (let i=0; i<zkey.nVars; i++) {
+            const B1 = await readG1(fd6, curve, toObject);
+
+            zkey.B1[i] = B1;
+        }
+        await endReadSectionFile(fd6);
+
+
+        // Read B2 points
+        ///////////
+        const fd7 = await startReadSectionFile(zkeyFileName, 7, maxZKeyVersion);
+        zkey.B2 = [];
+        for (let i=0; i<zkey.nVars; i++) {
+            const B2 = await readG2(fd7, curve, toObject);
+            zkey.B2[i] = B2;
+        }
+        await endReadSectionFile(fd7);
+
+
+        // Read C points
+        ///////////
+        const fd8 = await startReadSectionFile(zkeyFileName, 8, maxZKeyVersion);
+        zkey.C = [];
+        for (let i=zkey.nPublic+1; i<zkey.nVars; i++) {
+            const C = await readG1(fd8, curve, toObject);
+
+            zkey.C[i] = C;
+        }
+        await endReadSectionFile(fd8);
+
+
+        // Read H points
+        ///////////
+        const fd9 = await startReadSectionFile(zkeyFileName, 9, maxZKeyVersion);
+        zkey.hExps = [];
+        for (let i=0; i<zkey.domainSize; i++) {
+            const H = await readG1(fd9, curve, toObject);
+            zkey.hExps.push(H);
+        }
+        await endReadSectionFile(fd9);
+
+        return zkey;
+
+        async function readFr2(fd, toObject) {
+            const n = await readBigInt(fd, zkey.n8r);
+            return Fr.mul(n, Rri2);
+        }
+
+    }
+
+
+    async function readContribution$1(fd, curve, toObject) {
+        const c = {delta:{}};
+        c.deltaAfter = await readG1(fd, curve, toObject);
+        c.delta.g1_s = await readG1(fd, curve, toObject);
+        c.delta.g1_sx = await readG1(fd, curve, toObject);
+        c.delta.g2_spx = await readG2(fd, curve, toObject);
+        c.transcript = await fd.read(64);
+        c.type = await fd.readULE32();
+
+        const paramLength = await fd.readULE32();
+        const curPos = fd.pos;
+        let lastType =0;
+        while (fd.pos-curPos < paramLength) {
+            const buffType = await fd.read(1);
+            if (buffType[0]<= lastType) throw new Error("Parameters in the contribution must be sorted");
+            lastType = buffType[0];
+            if (buffType[0]==1) {     // Name
+                const buffLen = await fd.read(1);
+                const buffStr = await fd.read(buffLen[0]);
+                c.name = new TextDecoder().decode(buffStr);
+            } else if (buffType[0]==2) {
+                const buffExp = await fd.read(1);
+                c.numIterationsExp = buffExp[0];
+            } else if (buffType[0]==3) {
+                const buffLen = await fd.read(1);
+                c.beaconHash = await fd.read(buffLen[0]);
+            } else {
+                throw new Error("Parameter not recognized");
+            }
+        }
+        if (fd.pos != curPos + paramLength) {
+            throw new Error("Parametes do not match");
+        }
+
+        return c;
+    }
+
+
+    async function readMPCParams(zkeyFileName, maxZKeyVersion, curve) {
+        const fd = await startReadSectionFile(zkeyFileName, 10, maxZKeyVersion);
+        const res = { contributions: []};
+        res.csHash = await fd.read(64);
+        const n = await fd.readULE32();
+        for (let i=0; i<n; i++) {
+            const c = await readContribution$1(fd, curve);
+            res.contributions.push(c);
+        }
+        await endReadSectionFile(fd);
+
+        return res;
+    }
+
+    async function writeContribution$1(fd, curve, c) {
+        await writeG1(fd, curve, c.deltaAfter);
+        await writeG1(fd, curve, c.delta.g1_s);
+        await writeG1(fd, curve, c.delta.g1_sx);
+        await writeG2(fd, curve, c.delta.g2_spx);
+        await fd.write(c.transcript);
+        await fd.writeULE32(c.type || 0);
+
+        const params = [];
+        if (c.name) {
+            params.push(1);      // Param Name
+            const nameData = new TextEncoder("utf-8").encode(c.name.substring(0,64));
+            params.push(nameData.byteLength);
+            for (let i=0; i<nameData.byteLength; i++) params.push(nameData[i]);
+        }
+        if (c.type == 1) {
+            params.push(2);      // Param numIterationsExp
+            params.push(c.numIterationsExp);
+
+            params.push(3);      // Beacon Hash
+            params.push(c.beaconHash.byteLength);
+            for (let i=0; i<c.beaconHash.byteLength; i++) params.push(c.beaconHash[i]);
+        }
+        if (params.length>0) {
+            const paramsBuff = new Uint8Array(params);
+            await fd.writeULE32(paramsBuff.byteLength);
+            await fd.write(paramsBuff);
+        } else {
+            await fd.writeULE32(0);
+        }
+
+    }
+
+    async function writeMPCParams(zkeyName, curve, mpcParams) {
+        const fd = await startWriteSectionFile(zkeyName, 10);
+        await fd.write(mpcParams.csHash);
+        await fd.writeULE32(mpcParams.contributions.length);
+        for (let i=0; i<mpcParams.contributions.length; i++) {
+            await writeContribution$1(fd, curve,mpcParams.contributions[i]);
+        }
+        await endWriteSectionFile(fd);
+    }
+
+    function hashG1(hasher, curve, p) {
+        const buff = new Uint8Array(curve.G1.F.n8*2);
+        curve.G1.toRprUncompressed(buff, 0, p);
+        hasher.update(buff);
+    }
+
+    function hashG2(hasher,curve, p) {
+        const buff = new Uint8Array(curve.G2.F.n8*2);
+        curve.G2.toRprUncompressed(buff, 0, p);
+        hasher.update(buff);
+    }
+
+    function hashPubKey(hasher, curve, c) {
+        hashG1(hasher, curve, c.deltaAfter);
+        hashG1(hasher, curve, c.delta.g1_s);
+        hashG1(hasher, curve, c.delta.g1_sx);
+        hashG2(hasher, curve, c.delta.g2_spx);
+        hasher.update(c.transcript);
+    }
+
+    /*
+        Copyright 2018 0KIMS association.
+
+        This file is part of snarkJS.
+
+        snarkJS is a free software: you can redistribute it and/or modify it
+        under the terms of the GNU General Public License as published by
+        the Free Software Foundation, either version 3 of the License, or
+        (at your option) any later version.
+
+        snarkJS is distributed in the hope that it will be useful, but WITHOUT
+        ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+        or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+        License for more details.
+
+        You should have received a copy of the GNU General Public License
+        along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+    */
+
+
+    async function write(fd, witness, prime) {
+
+        await startWriteSection(fd, 1);
+        const n8 = (Math.floor( (Scalar.bitLength(prime) - 1) / 64) +1)*8;
+        await fd.writeULE32(n8);
+        await writeBigInt(fd, prime, n8);
+        await fd.writeULE32(witness.length);
+        await endWriteSection(fd);
+
+        await startWriteSection(fd, 2);
+        for (let i=0; i<witness.length; i++) {
+            await writeBigInt(fd, witness[i], n8);
+        }
+        await endWriteSection(fd);
+
+
+    }
+
+    async function writeBin(fd, witnessBin, prime) {
+
+        await startWriteSection(fd, 1);
+        const n8 = (Math.floor( (Scalar.bitLength(prime) - 1) / 64) +1)*8;
+        await fd.writeULE32(n8);
+        await writeBigInt(fd, prime, n8);
+        if (witnessBin.byteLength % n8 != 0) {
+            throw new Error("Invalid witness length");
+        }
+        await fd.writeULE32(witnessBin.byteLength / n8);
+        await endWriteSection(fd);
+
+
+        await startWriteSection(fd, 2);
+        await fd.write(witnessBin);
+        await endWriteSection(fd);
+
+    }
+
+    async function readHeader(fd, sections) {
+
+        await startReadUniqueSection(fd, sections, 1);
+        const n8 = await fd.readULE32();
+        const q = await readBigInt(fd, n8);
+        const nWitness = await fd.readULE32();
+        await endReadSection(fd);
+
+        return {n8, q, nWitness};
+
+    }
+
+    async function read(fileName) {
+
+        const {fd, sections} = await readBinFile(fileName, "wtns", 2);
+
+        const {n8, nWitness} = await readHeader(fd, sections);
+
+        await startReadUniqueSection(fd, sections, 2);
+        const res = [];
+        for (let i=0; i<nWitness; i++) {
+            const v = await readBigInt(fd, n8);
+            res.push(v);
+        }
+        await endReadSection(fd);
+
+        await fd.close();
+
+        return res;
+    }
+
+    /*
+        Copyright 2018 0KIMS association.
+
+        This file is part of snarkJS.
+
+        snarkJS is a free software: you can redistribute it and/or modify it
+        under the terms of the GNU General Public License as published by
+        the Free Software Foundation, either version 3 of the License, or
+        (at your option) any later version.
+
+        snarkJS is distributed in the hope that it will be useful, but WITHOUT
+        ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+        or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+        License for more details.
+
+        You should have received a copy of the GNU General Public License
+        along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+    */
+    const {stringifyBigInts: stringifyBigInts$3} = utils;
+
+    async function groth16Prove(zkeyFileName, witnessFileName, logger) {
+        const {fd: fdWtns, sections: sectionsWtns} = await readBinFile(witnessFileName, "wtns", 2);
+
+        const wtns = await readHeader(fdWtns, sectionsWtns);
+
+        const maxZKeyVersion = 2;
+
+        const zkey = await readHeader$1(zkeyFileName, maxZKeyVersion);
+
+        if (zkey.protocol != "groth16") {
+            throw new Error("zkey file is not groth16");
+        }
+
+        if (!Scalar.eq(zkey.r,  wtns.q)) {
+            throw new Error("Curve of the witness does not match the curve of the proving key");
+        }
+
+        if (wtns.nWitness != zkey.nVars) {
+            throw new Error(`Invalid witness length. Circuit: ${zkey.nVars}, witness: ${wtns.nWitness}`);
+        }
+
+        const curve = await getCurveFromQ(zkey.q);
+        const Fr = curve.Fr;
+        const G1 = curve.G1;
+        const G2 = curve.G2;
+
+        const power = log2(zkey.domainSize);
+
+        if (logger) logger.debug("Reading Wtns");
+        const buffWitness = await readSection(fdWtns, sectionsWtns, 2);
+        if (logger) logger.debug("Reading Coeffs");
+        const buffCoeffs = await readSectionFile(zkeyFileName, 4, maxZKeyVersion);
+
+        if (logger) logger.debug("Building ABC");
+        const [buffA_T, buffB_T, buffC_T] = await buildABC1(curve, zkey, buffWitness, buffCoeffs, logger);
+
+        const inc = power == Fr.s ? curve.Fr.shift : curve.Fr.w[power+1];
+
+        const buffA = await Fr.ifft(buffA_T, "", "", logger, "IFFT_A");
+        const buffAodd = await Fr.batchApplyKey(buffA, Fr.e(1), inc);
+        const buffAodd_T = await Fr.fft(buffAodd, "", "", logger, "FFT_A");
+
+        const buffB = await Fr.ifft(buffB_T, "", "", logger, "IFFT_B");
+        const buffBodd = await Fr.batchApplyKey(buffB, Fr.e(1), inc);
+        const buffBodd_T = await Fr.fft(buffBodd, "", "", logger, "FFT_B");
+
+        const buffC = await Fr.ifft(buffC_T, "", "", logger, "IFFT_C");
+        const buffCodd = await Fr.batchApplyKey(buffC, Fr.e(1), inc);
+        const buffCodd_T = await Fr.fft(buffCodd, "", "", logger, "FFT_C");
+
+        if (logger) logger.debug("Join ABC");
+        const buffPodd_T = await joinABC(curve, zkey, buffAodd_T, buffBodd_T, buffCodd_T, logger);
+
+        let proof = {};
+
+        if (logger) logger.debug("Reading A Points");
+        const buffBasesA = await readSectionFile(zkeyFileName, 5, maxZKeyVersion);
+        proof.pi_a = await curve.G1.multiExpAffine(buffBasesA, buffWitness, logger, "multiexp A");
+
+        if (logger) logger.debug("Reading B1 Points");
+        const buffBasesB1 = await readSectionFile(zkeyFileName, 6, maxZKeyVersion);
+        let pib1 = await curve.G1.multiExpAffine(buffBasesB1, buffWitness, logger, "multiexp B1");
+
+        if (logger) logger.debug("Reading B2 Points");
+        const buffBasesB2 = await readSectionFile(zkeyFileName, 7, maxZKeyVersion);
+        proof.pi_b = await curve.G2.multiExpAffine(buffBasesB2, buffWitness, logger, "multiexp B2");
+
+        if (logger) logger.debug("Reading C Points");
+        const buffBasesC = await readSectionFile(zkeyFileName, 8, maxZKeyVersion);
+        proof.pi_c = await curve.G1.multiExpAffine(buffBasesC, buffWitness.slice((zkey.nPublic+1)*curve.Fr.n8), logger, "multiexp C");
+
+        if (logger) logger.debug("Reading H Points");
+        const buffBasesH = await readSectionFile(zkeyFileName, 9, maxZKeyVersion);
+        const resH = await curve.G1.multiExpAffine(buffBasesH, buffPodd_T, logger, "multiexp H");
+
+        const r = curve.Fr.random();
+        const s = curve.Fr.random();
+
+        proof.pi_a  = G1.add( proof.pi_a, zkey.vk_alpha_1 );
+        proof.pi_a  = G1.add( proof.pi_a, G1.timesFr( zkey.vk_delta_1, r ));
+
+        proof.pi_b  = G2.add( proof.pi_b, zkey.vk_beta_2 );
+        proof.pi_b  = G2.add( proof.pi_b, G2.timesFr( zkey.vk_delta_2, s ));
+
+        pib1 = G1.add( pib1, zkey.vk_beta_1 );
+        pib1 = G1.add( pib1, G1.timesFr( zkey.vk_delta_1, s ));
+
+        proof.pi_c = G1.add(proof.pi_c, resH);
+
+
+        proof.pi_c  = G1.add( proof.pi_c, G1.timesFr( proof.pi_a, s ));
+        proof.pi_c  = G1.add( proof.pi_c, G1.timesFr( pib1, r ));
+        proof.pi_c  = G1.add( proof.pi_c, G1.timesFr( zkey.vk_delta_1, Fr.neg(Fr.mul(r,s) )));
+
+
+        let publicSignals = [];
+
+        for (let i=1; i<= zkey.nPublic; i++) {
+            const b = buffWitness.slice(i*Fr.n8, i*Fr.n8+Fr.n8);
+            publicSignals.push(Scalar.fromRprLE(b));
+        }
+
+        proof.pi_a = G1.toObject(G1.toAffine(proof.pi_a));
+        proof.pi_b = G2.toObject(G2.toAffine(proof.pi_b));
+        proof.pi_c = G1.toObject(G1.toAffine(proof.pi_c));
+
+        proof.protocol = "groth16";
+        proof.curve = curve.name;
+
+        await fdWtns.close();
+
+        proof = stringifyBigInts$3(proof);
+        publicSignals = stringifyBigInts$3(publicSignals);
+
+        await curve.terminate();
+
+        return {proof, publicSignals};
+    }
+
+
+    async function buildABC1(curve, zkey, witness, coeffs, logger) {
+        const n8 = curve.Fr.n8;
+        const sCoef = 4*3 + zkey.n8r;
+        const nCoef = (coeffs.byteLength-4) / sCoef;
+
+        const outBuffA = new BigBuffer(zkey.domainSize * n8);
+        const outBuffB = new BigBuffer(zkey.domainSize * n8);
+        const outBuffC = new BigBuffer(zkey.domainSize * n8);
+
+        const outBuf = [ outBuffA, outBuffB ];
+        for (let i=0; i<nCoef; i++) {
+            if ((logger)&&(i%1000000 == 0)) logger.debug(`QAP AB: ${i}/${nCoef}`);
+            const buffCoef = coeffs.slice(4+i*sCoef, 4+i*sCoef+sCoef);
+            const buffCoefV = new DataView(buffCoef.buffer);
+            const m= buffCoefV.getUint32(0, true);
+            const c= buffCoefV.getUint32(4, true);
+            const s= buffCoefV.getUint32(8, true);
+            const coef = buffCoef.slice(12, 12+n8);
+            outBuf[m].set(
+                curve.Fr.add(
+                    outBuf[m].slice(c*n8, c*n8+n8),
+                    curve.Fr.mul(coef, witness.slice(s*n8, s*n8+n8))
+                ),
+                c*n8
+            );
+        }
+
+        for (let i=0; i<zkey.domainSize; i++) {
+            if ((logger)&&(i%1000000 == 0)) logger.debug(`QAP C: ${i}/${zkey.domainSize}`);
+            outBuffC.set(
+                curve.Fr.mul(
+                    outBuffA.slice(i*n8, i*n8+n8),
+                    outBuffB.slice(i*n8, i*n8+n8),
+                ),
+                i*n8
+            );
+        }
+
+        return [outBuffA, outBuffB, outBuffC];
+
+    }
+
+    /*
+    async function buldABC(curve, zkey, witness, coeffs, logger) {
+        const concurrency = curve.tm.concurrency;
+        const sCoef = 4*3 + zkey.n8r;
+
+        let getUint32;
+
+        if (coeffs instanceof BigBuffer) {
+            const coeffsDV = [];
+            const PAGE_LEN = coeffs.buffers[0].length;
+            for (let i=0; i< coeffs.buffers.length; i++) {
+                coeffsDV.push(new DataView(coeffs.buffers[i].buffer));
+            }
+            getUint32 = function (pos) {
+                return coeffsDV[Math.floor(pos/PAGE_LEN)].getUint32(pos % PAGE_LEN, true);
+            };
+        } else {
+            const coeffsDV = new DataView(coeffs.buffer, coeffs.byteOffset, coeffs.byteLength);
+            getUint32 = function (pos) {
+                return coeffsDV.getUint32(pos, true);
+            };
+        }
+
+        const elementsPerChunk = Math.floor(zkey.domainSize/concurrency);
+        const promises = [];
+
+        const cutPoints = [];
+        for (let i=0; i<concurrency; i++) {
+            cutPoints.push( getCutPoint( Math.floor(i*elementsPerChunk) ));
+        }
+        cutPoints.push(coeffs.byteLength);
+
+        const chunkSize = 2**26;
+        for (let s=0 ; s<zkey.nVars ; s+= chunkSize) {
+            if (logger) logger.debug(`QAP ${s}: ${s}/${zkey.nVars}`);
+            const ns= Math.min(zkey.nVars-s, chunkSize );
+
+            for (let i=0; i<concurrency; i++) {
+                let n;
+                if (i< concurrency-1) {
+                    n = elementsPerChunk;
+                } else {
+                    n = zkey.domainSize - i*elementsPerChunk;
+                }
+                if (n==0) continue;
+
+                const task = [];
+
+                task.push({cmd: "ALLOCSET", var: 0, buff: coeffs.slice(cutPoints[i], cutPoints[i+1])});
+                task.push({cmd: "ALLOCSET", var: 1, buff: witness.slice(s*curve.Fr.n8, (s+ns)*curve.Fr.n8)});
+                task.push({cmd: "ALLOC", var: 2, len: n*curve.Fr.n8});
+                task.push({cmd: "ALLOC", var: 3, len: n*curve.Fr.n8});
+                task.push({cmd: "ALLOC", var: 4, len: n*curve.Fr.n8});
+                task.push({cmd: "CALL", fnName: "qap_buildABC", params:[
+                    {var: 0},
+                    {val: (cutPoints[i+1] - cutPoints[i])/sCoef},
+                    {var: 1},
+                    {var: 2},
+                    {var: 3},
+                    {var: 4},
+                    {val: i*elementsPerChunk},
+                    {val: n},
+                    {val: s},
+                    {val: ns}
+                ]});
+                task.push({cmd: "GET", out: 0, var: 2, len: n*curve.Fr.n8});
+                task.push({cmd: "GET", out: 1, var: 3, len: n*curve.Fr.n8});
+                task.push({cmd: "GET", out: 2, var: 4, len: n*curve.Fr.n8});
+                promises.push(curve.tm.queueAction(task));
+            }
+        }
+
+        let result = await Promise.all(promises);
+
+        const nGroups = result.length / concurrency;
+        if (nGroups>1) {
+            const promises2 = [];
+            for (let i=0; i<concurrency; i++) {
+                const task=[];
+                task.push({cmd: "ALLOC", var: 0, len: result[i][0].byteLength});
+                task.push({cmd: "ALLOC", var: 1, len: result[i][0].byteLength});
+                for (let m=0; m<3; m++) {
+                    task.push({cmd: "SET", var: 0, buff: result[i][m]});
+                    for (let s=1; s<nGroups; s++) {
+                        task.push({cmd: "SET", var: 1, buff: result[s*concurrency + i][m]});
+                        task.push({cmd: "CALL", fnName: "qap_batchAdd", params:[
+                            {var: 0},
+                            {var: 1},
+                            {val: result[i][m].length/curve.Fr.n8},
+                            {var: 0}
+                        ]});
+                    }
+                    task.push({cmd: "GET", out: m, var: 0, len: result[i][m].length});
+                }
+                promises2.push(curve.tm.queueAction(task));
+            }
+            result = await Promise.all(promises2);
+        }
+
+        const outBuffA = new BigBuffer(zkey.domainSize * curve.Fr.n8);
+        const outBuffB = new BigBuffer(zkey.domainSize * curve.Fr.n8);
+        const outBuffC = new BigBuffer(zkey.domainSize * curve.Fr.n8);
+        let p=0;
+        for (let i=0; i<result.length; i++) {
+            outBuffA.set(result[i][0], p);
+            outBuffB.set(result[i][1], p);
+            outBuffC.set(result[i][2], p);
+            p += result[i][0].byteLength;
+        }
+
+        return [outBuffA, outBuffB, outBuffC];
+
+        function getCutPoint(v) {
+            let m = 0;
+            let n = getUint32(0);
+            while (m < n) {
+                var k = Math.floor((n + m) / 2);
+                const va = getUint32(4 + k*sCoef + 4);
+                if (va > v) {
+                    n = k - 1;
+                } else if (va < v) {
+                    m = k + 1;
+                } else {
+                    n = k;
+                }
+            }
+            return 4 + m*sCoef;
+        }
+    }
+    */
+
+    async function joinABC(curve, zkey, a, b, c, logger) {
+        const MAX_CHUNK_SIZE = 1 << 22;
+
+        const n8 = curve.Fr.n8;
+        const nElements = Math.floor(a.byteLength / curve.Fr.n8);
+
+        const promises = [];
+
+        for (let i=0; i<nElements; i += MAX_CHUNK_SIZE) {
+            if (logger) logger.debug(`JoinABC: ${i}/${nElements}`);
+            const n= Math.min(nElements - i, MAX_CHUNK_SIZE);
+
+            const task = [];
+
+            const aChunk = a.slice(i*n8, (i + n)*n8 );
+            const bChunk = b.slice(i*n8, (i + n)*n8 );
+            const cChunk = c.slice(i*n8, (i + n)*n8 );
+
+            task.push({cmd: "ALLOCSET", var: 0, buff: aChunk});
+            task.push({cmd: "ALLOCSET", var: 1, buff: bChunk});
+            task.push({cmd: "ALLOCSET", var: 2, buff: cChunk});
+            task.push({cmd: "ALLOC", var: 3, len: n*n8});
+            task.push({cmd: "CALL", fnName: "qap_joinABC", params:[
+                {var: 0},
+                {var: 1},
+                {var: 2},
+                {val: n},
+                {var: 3},
+            ]});
+            task.push({cmd: "CALL", fnName: "frm_batchFromMontgomery", params:[
+                {var: 3},
+                {val: n},
+                {var: 3}
+            ]});
+            task.push({cmd: "GET", out: 0, var: 3, len: n*n8});
+            promises.push(curve.tm.queueAction(task));
+        }
+
+        const result = await Promise.all(promises);
+
+        let outBuff;
+        if (a instanceof BigBuffer) {
+            outBuff = new BigBuffer(a.byteLength);
+        } else {
+            outBuff = new Uint8Array(a.byteLength);
+        }
+
+        let p=0;
+        for (let i=0; i<result.length; i++) {
+            outBuff.set(result[i][0], p);
+            p += result[i][0].byteLength;
+        }
+
+        return outBuff;
+    }
+
+    /*
+
+    Copyright 2020 0KIMS association.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+    */
+
+    function flatArray(a) {
+        var res = [];
+        fillArray(res, a);
+        return res;
+
+        function fillArray(res, a) {
+            if (Array.isArray(a)) {
+                for (let i=0; i<a.length; i++) {
+                    fillArray(res, a[i]);
+                }
+            } else {
+                res.push(a);
+            }
+        }
+    }
+
+    function fnvHash(str) {
+        const uint64_max = BigInt(2) ** BigInt(64);
+        let hash = BigInt("0xCBF29CE484222325");
+        for (var i = 0; i < str.length; i++) {
+        hash ^= BigInt(str[i].charCodeAt());
+        hash *= BigInt(0x100000001B3);
+        hash %= uint64_max;
+        }
+        let shash = hash.toString(16);
+        let n = 16 - shash.length;
+        shash = '0'.repeat(n).concat(shash);
+        return shash;
+    }
+
+    // Note that this pads zeros
+    function toArray32(s,size) {
+        const res = []; //new Uint32Array(size); //has no unshift
+        let rem = BigInt(s);
+        const radix = BigInt(0x100000000);
+        while (rem) {
+            res.unshift( Number(rem % radix));
+            rem = rem / radix;
+        }
+        if (size) {
+        var i = size - res.length;
+        while (i>0) {
+            res.unshift(0);
+            i--;
+        }
+        }
+        return res;
+    }
+
+    /* globals WebAssembly */
+
+    async function builder(code, options) {
+
+        options = options || {};
+
+        let memorySize = 32767;
+        let memory;
+        let memoryAllocated = false;
+        while (!memoryAllocated){
+            try{
+                memory = new WebAssembly.Memory({initial:memorySize});
+                memoryAllocated = true;
+            } catch(err){
+                if(memorySize === 1){
+                    throw err;
+                }
+                console.warn("Could not allocate " + memorySize * 1024 * 64 + " bytes. This may cause severe instability. Trying with " + memorySize * 1024 * 64 / 2 + " bytes");
+                memorySize = Math.floor(memorySize/2);
+            }
+        }
+
+        const wasmModule = await WebAssembly.compile(code);
+
+        let wc;
+
+        const instance = await WebAssembly.instantiate(wasmModule, {
+            env: {
+                "memory": memory
+            },
+            runtime: {
+                exceptionHandler: function(code) {
+                    let errStr;
+                    if (code == 1) {
+                        errStr = "Signal not found. ";
+                    } else if (code == 2) {
+                        errStr = "Too many signals set. ";
+                    } else if (code == 3) {
+                        errStr = "Signal already set. ";
+                    } else if (code == 4) {
+                        errStr = "Assert Failed. ";
+                    } else if (code == 5) {
+                        errStr = "Not enough memory. ";
+                    } else {
+                        errStr = "Unknown error.";
+                    }
+                    console.log("ERROR: ", code, errStr);
+                    throw new Error(errStr);
+                },
+                showSharedRWMemory: function() {
+                    const shared_rw_memory_size = instance.exports.getFieldNumLen32();
+                    const arr = new Uint32Array(shared_rw_memory_size);
+                    for (let j=0; j<shared_rw_memory_size; j++) {
+                        arr[shared_rw_memory_size-1-j] = instance.exports.readSharedRWMemory(j);
+                    }
+                    console.log(Scalar.fromArray(arr, 0x100000000));
+                },
+                error: function(code, pstr, a,b,c,d) {
+                    let errStr;
+                    if (code == 7) {
+                        errStr=p2str(pstr) + " " + wc.getFr(b).toString() + " != " + wc.getFr(c).toString() + " " +p2str(d);
+                    } else if (code == 9) {
+                        errStr=p2str(pstr) + " " + wc.getFr(b).toString() + " " +p2str(c);
+                    } else if ((code == 5)&&(options.sym)) {
+                        errStr=p2str(pstr)+ " " + options.sym.labelIdx2Name[c];
+                    } else {
+                        errStr=p2str(pstr)+ " " + a + " " + b + " " + c + " " + d;
+                    }
+                    console.log("ERROR: ", code, errStr);
+                    throw new Error(errStr);
+                },
+                log: function(a) {
+                    console.log(wc.getFr(a).toString());
+                },
+                logGetSignal: function(signal, pVal) {
+                    if (options.logGetSignal) {
+                        options.logGetSignal(signal, wc.getFr(pVal) );
+                    }
+                },
+                logSetSignal: function(signal, pVal) {
+                    if (options.logSetSignal) {
+                        options.logSetSignal(signal, wc.getFr(pVal) );
+                    }
+                },
+                logStartComponent: function(cIdx) {
+                    if (options.logStartComponent) {
+                        options.logStartComponent(cIdx);
+                    }
+                },
+                logFinishComponent: function(cIdx) {
+                    if (options.logFinishComponent) {
+                        options.logFinishComponent(cIdx);
+                    }
+                }
+            }
+        });
+
+        const sanityCheck =
+            options &&
+            (
+                options.sanityCheck ||
+                options.logGetSignal ||
+                options.logSetSignal ||
+                options.logStartComponent ||
+                options.logFinishComponent
+            );
+
+        if (typeof instance.exports.getVersion == 'function') {
+            // Only circom 2 WASMs implement versioning
+            wc = new WitnessCalculatorCircom2(instance, sanityCheck);
+        } else {
+            wc = new WitnessCalculatorCircom1(memory, instance, sanityCheck);
+        }
+        return wc;
+
+        function p2str(p) {
+            const i8 = new Uint8Array(memory.buffer);
+
+            const bytes = [];
+
+            for (let i=0; i8[p+i]>0; i++)  bytes.push(i8[p+i]);
+
+            return String.fromCharCode.apply(null, bytes);
+        }
+    }
+    class WitnessCalculatorCircom1 {
+        constructor(memory, instance, sanityCheck) {
+            this.memory = memory;
+            this.i32 = new Uint32Array(memory.buffer);
+            this.instance = instance;
+
+            this.n32 = (this.instance.exports.getFrLen() >> 2) - 2;
+            const pRawPrime = this.instance.exports.getPRawPrime();
+
+            const arr = new Array(this.n32);
+            for (let i=0; i<this.n32; i++) {
+                arr[this.n32-1-i] = this.i32[(pRawPrime >> 2) + i];
+            }
+
+            this.prime = Scalar.fromArray(arr, 0x100000000);
+
+            this.Fr = new F1Field(this.prime);
+
+            this.mask32 = Scalar.fromString("FFFFFFFF", 16);
+            this.NVars = this.instance.exports.getNVars();
+            this.n64 = Math.floor((this.Fr.bitLength - 1) / 64)+1;
+            this.R = this.Fr.e( Scalar.shiftLeft(1 , this.n64*64));
+            this.RInv = this.Fr.inv(this.R);
+            this.sanityCheck = sanityCheck;
+        }
+
+        circom_version() {
+            return 1;
+        }
+
+        async _doCalculateWitness(input, sanityCheck) {
+            this.instance.exports.init((this.sanityCheck || sanityCheck) ? 1 : 0);
+            const pSigOffset = this.allocInt();
+            const pFr = this.allocFr();
+            const keys = Object.keys(input);
+            keys.forEach( (k) => {
+                const h = fnvHash(k);
+                const hMSB = parseInt(h.slice(0,8), 16);
+                const hLSB = parseInt(h.slice(8,16), 16);
+                try {
+                    this.instance.exports.getSignalOffset32(pSigOffset, 0, hMSB, hLSB);
+                } catch (err) {
+                    throw new Error(`Signal ${k} is not an input of the circuit.`);
+                }
+                const sigOffset = this.getInt(pSigOffset);
+                const fArr = flatArray(input[k]);
+                for (let i=0; i<fArr.length; i++) {
+                    this.setFr(pFr, fArr[i]);
+                    this.instance.exports.setSignal(0, 0, sigOffset + i, pFr);
+                }
+            });
+        }
+
+        async calculateWitness(input, sanityCheck) {
+            const self = this;
+
+            const old0 = self.i32[0];
+            const w = [];
+
+            await self._doCalculateWitness(input, sanityCheck);
+
+            for (let i=0; i<self.NVars; i++) {
+                const pWitness = self.instance.exports.getPWitness(i);
+                w.push(self.getFr(pWitness));
+            }
+
+            self.i32[0] = old0;
+            return w;
+        }
+
+        async calculateBinWitness(input, sanityCheck) {
+            const self = this;
+
+            const old0 = self.i32[0];
+
+            await self._doCalculateWitness(input, sanityCheck);
+
+            const pWitnessBuffer = self.instance.exports.getWitnessBuffer();
+
+            self.i32[0] = old0;
+
+            const buff = self.memory.buffer.slice(pWitnessBuffer, pWitnessBuffer + (self.NVars * self.n64 * 8));
+            return new Uint8Array(buff);
+        }
+
+        allocInt() {
+            const p = this.i32[0];
+            this.i32[0] = p+8;
+            return p;
+        }
+
+        allocFr() {
+            const p = this.i32[0];
+            this.i32[0] = p+this.n32*4 + 8;
+            return p;
+        }
+
+        getInt(p) {
+            return this.i32[p>>2];
+        }
+
+        setInt(p, v) {
+            this.i32[p>>2] = v;
+        }
+
+        getFr(p) {
+            const self = this;
+            const idx = (p>>2);
+
+            if (self.i32[idx + 1] & 0x80000000) {
+                const arr = new Array(self.n32);
+                for (let i=0; i<self.n32; i++) {
+                    arr[self.n32-1-i] = self.i32[idx+2+i];
+                }
+                const res = self.Fr.e(Scalar.fromArray(arr, 0x100000000));
+                if (self.i32[idx + 1] & 0x40000000) {
+                    return fromMontgomery(res);
+                } else {
+                    return res;
+                }
+
+            } else {
+                if (self.i32[idx] & 0x80000000) {
+                    return self.Fr.e( self.i32[idx] - 0x100000000);
+                } else {
+                    return self.Fr.e(self.i32[idx]);
+                }
+            }
+
+            function fromMontgomery(n) {
+                return self.Fr.mul(self.RInv, n);
+            }
+
+        }
+
+
+        setFr(p, v) {
+            const self = this;
+
+            v = self.Fr.e(v);
+
+            const minShort = self.Fr.neg(self.Fr.e("80000000", 16));
+            const maxShort = self.Fr.e("7FFFFFFF", 16);
+
+            if (  (self.Fr.geq(v, minShort))
+                &&(self.Fr.leq(v, maxShort)))
+            {
+                let a;
+                if (self.Fr.geq(v, self.Fr.zero)) {
+                    a = Scalar.toNumber(v);
+                } else {
+                    a = Scalar.toNumber( self.Fr.sub(v, minShort));
+                    a = a - 0x80000000;
+                    a = 0x100000000 + a;
+                }
+                self.i32[(p >> 2)] = a;
+                self.i32[(p >> 2) + 1] = 0;
+                return;
+            }
+
+            self.i32[(p >> 2)] = 0;
+            self.i32[(p >> 2) + 1] = 0x80000000;
+            const arr = Scalar.toArray(v, 0x100000000);
+            for (let i=0; i<self.n32; i++) {
+                const idx = arr.length-1-i;
+
+                if ( idx >=0) {
+                    self.i32[(p >> 2) + 2 + i] = arr[idx];
+                } else {
+                    self.i32[(p >> 2) + 2 + i] = 0;
+                }
+            }
+        }
+    }
+
+    class WitnessCalculatorCircom2 {
+        constructor(instance, sanityCheck) {
+            this.instance = instance;
+
+            this.version = this.instance.exports.getVersion();
+            this.n32 = this.instance.exports.getFieldNumLen32();
+
+            this.instance.exports.getRawPrime();
+            const arr = new Array(this.n32);
+            for (let i=0; i<this.n32; i++) {
+                arr[this.n32-1-i] = this.instance.exports.readSharedRWMemory(i);
+            }
+            this.prime = Scalar.fromArray(arr, 0x100000000);
+
+            this.witnessSize = this.instance.exports.getWitnessSize();
+
+            this.sanityCheck = sanityCheck;
+        }
+        
+        circom_version() {
+            return this.instance.exports.getVersion();
+        }
+
+        async _doCalculateWitness(input, sanityCheck) {
+            //input is assumed to be a map from signals to arrays of bigints
+            this.instance.exports.init((this.sanityCheck || sanityCheck) ? 1 : 0);
+            const keys = Object.keys(input);
+            var input_counter = 0;
+            keys.forEach( (k) => {
+                const h = fnvHash(k);
+                const hMSB = parseInt(h.slice(0,8), 16);
+                const hLSB = parseInt(h.slice(8,16), 16);
+                const fArr = flatArray(input[k]);
+                for (let i=0; i<fArr.length; i++) {
+            const arrFr = toArray32(fArr[i],this.n32);
+            for (let j=0; j<this.n32; j++) {
+                this.instance.exports.writeSharedRWMemory(j,arrFr[this.n32-1-j]);
+            }
+            try {
+                        this.instance.exports.setInputSignal(hMSB, hLSB,i);
+                input_counter++;
+            } catch (err) {
+                // console.log(`After adding signal ${i} of ${k}`)
+                        throw new Error(err);
+            }
+                }
+
+            });
+            if (input_counter < this.instance.exports.getInputSize()) {
+                throw new Error(`Not all inputs have been set. Only ${input_counter} out of ${this.instance.exports.getInputSize()}`);
+            }
+        }
+
+        async calculateWitness(input, sanityCheck) {
+            const w = [];
+
+            await this._doCalculateWitness(input, sanityCheck);
+
+            for (let i=0; i<this.witnessSize; i++) {
+                this.instance.exports.getWitness(i);
+            const arr = new Uint32Array(this.n32);
+                for (let j=0; j<this.n32; j++) {
+                arr[this.n32-1-j] = this.instance.exports.readSharedRWMemory(j);
+                }
+                w.push(fromArray32(arr));
+            }
+
+            return w;
+        }
+
+        async calculateWTNSBin(input, sanityCheck) {
+            const buff32 = new Uint32Array(this.witnessSize*this.n32+this.n32+11);
+            const buff = new  Uint8Array( buff32.buffer);
+            await this._doCalculateWitness(input, sanityCheck);
+          
+            //"wtns"
+            buff[0] = "w".charCodeAt(0);
+            buff[1] = "t".charCodeAt(0);
+            buff[2] = "n".charCodeAt(0);
+            buff[3] = "s".charCodeAt(0);
+
+            //version 2
+            buff32[1] = 2;
+
+            //number of sections: 2
+            buff32[2] = 2;
+
+            //id section 1
+            buff32[3] = 1;
+
+            const n8 = this.n32*4;
+            //id section 1 length in 64bytes
+            const idSection1length = 8 + n8;
+            const idSection1lengthHex = idSection1length.toString(16);
+                buff32[4] = parseInt(idSection1lengthHex.slice(0,8), 16);
+                buff32[5] = parseInt(idSection1lengthHex.slice(8,16), 16);
+
+            //this.n32
+            buff32[6] = n8;
+
+            //prime number
+            this.instance.exports.getRawPrime();
+
+            var pos = 7;
+            for (let j=0; j<this.n32; j++) {
+                buff32[pos+j] = this.instance.exports.readSharedRWMemory(j);
+            }
+            pos += this.n32;
+
+            // witness size
+            buff32[pos] = this.witnessSize;
+            pos++;
+
+            //id section 2
+            buff32[pos] = 2;
+            pos++;
+
+            // section 2 length
+            const idSection2length = n8*this.witnessSize;
+            const idSection2lengthHex = idSection2length.toString(16);
+            buff32[pos] = parseInt(idSection2lengthHex.slice(0,8), 16);
+            buff32[pos+1] = parseInt(idSection2lengthHex.slice(8,16), 16);
+
+            pos += 2;
+            for (let i=0; i<this.witnessSize; i++) {
+                this.instance.exports.getWitness(i);
+                for (let j=0; j<this.n32; j++) {
+                    buff32[pos+j] = this.instance.exports.readSharedRWMemory(j);
+                }
+                pos += this.n32;
+            }
+
+            return buff;
+        }
+
+    }
+
+    /*
+        Copyright 2018 0KIMS association.
+
+        This file is part of snarkJS.
+
+        snarkJS is a free software: you can redistribute it and/or modify it
+        under the terms of the GNU General Public License as published by
+        the Free Software Foundation, either version 3 of the License, or
+        (at your option) any later version.
+
+        snarkJS is distributed in the hope that it will be useful, but WITHOUT

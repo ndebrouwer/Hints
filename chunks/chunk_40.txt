@@ -1,0 +1,2500 @@
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/simple_regex_substrs.json
+---
+
+{
+  "transitions": [
+    [[2, 3]],
+    [
+      [6, 7],
+      [7, 7]
+    ],
+    [[8, 9]]
+  ]
+}
+
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/simple_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "@zk-email/zk-regex-circom/circuits/regex_helpers.circom";
+
+// regex: 1=(a|b) (2=(b|c)+ )+d
+template SimpleRegex(msg_bytes) {
+	signal input msg[msg_bytes];
+	signal output out;
+
+	var num_bytes = msg_bytes+1;
+	signal in[num_bytes];
+	signal in_range_checks[msg_bytes];
+	in[0]<==255;
+	for (var i = 0; i < msg_bytes; i++) {
+		in_range_checks[i] <== LessThan(8)([msg[i], 255]);
+		in_range_checks[i] === 1;
+		in[i+1] <== msg[i];
+	}
+
+	component eq[8][num_bytes];
+	component and[11][num_bytes];
+	component multi_or[4][num_bytes];
+	signal states[num_bytes+1][10];
+	signal states_tmp[num_bytes+1][10];
+	signal from_zero_enabled[num_bytes+1];
+	from_zero_enabled[num_bytes] <== 0;
+	component state_changed[num_bytes];
+
+	for (var i = 1; i < 10; i++) {
+		states[0][i] <== 0;
+	}
+
+	for (var i = 0; i < num_bytes; i++) {
+		state_changed[i] = MultiOR(9);
+		states[i][0] <== 1;
+		eq[0][i] = IsEqual();
+		eq[0][i].in[0] <== in[i];
+		eq[0][i].in[1] <== 49;
+		and[0][i] = AND();
+		and[0][i].a <== states[i][0];
+		and[0][i].b <== eq[0][i].out;
+		states_tmp[i+1][1] <== 0;
+		eq[1][i] = IsEqual();
+		eq[1][i].in[0] <== in[i];
+		eq[1][i].in[1] <== 61;
+		and[1][i] = AND();
+		and[1][i].a <== states[i][1];
+		and[1][i].b <== eq[1][i].out;
+		states[i+1][2] <== and[1][i].out;
+		eq[2][i] = IsEqual();
+		eq[2][i].in[0] <== in[i];
+		eq[2][i].in[1] <== 97;
+		eq[3][i] = IsEqual();
+		eq[3][i].in[0] <== in[i];
+		eq[3][i].in[1] <== 98;
+		and[2][i] = AND();
+		and[2][i].a <== states[i][2];
+		multi_or[0][i] = MultiOR(2);
+		multi_or[0][i].in[0] <== eq[2][i].out;
+		multi_or[0][i].in[1] <== eq[3][i].out;
+		and[2][i].b <== multi_or[0][i].out;
+		states[i+1][3] <== and[2][i].out;
+		eq[4][i] = IsEqual();
+		eq[4][i].in[0] <== in[i];
+		eq[4][i].in[1] <== 32;
+		and[3][i] = AND();
+		and[3][i].a <== states[i][3];
+		and[3][i].b <== eq[4][i].out;
+		states[i+1][4] <== and[3][i].out;
+		eq[5][i] = IsEqual();
+		eq[5][i].in[0] <== in[i];
+		eq[5][i].in[1] <== 50;
+		and[4][i] = AND();
+		and[4][i].a <== states[i][4];
+		and[4][i].b <== eq[5][i].out;
+		and[5][i] = AND();
+		and[5][i].a <== states[i][8];
+		and[5][i].b <== eq[5][i].out;
+		multi_or[1][i] = MultiOR(2);
+		multi_or[1][i].in[0] <== and[4][i].out;
+		multi_or[1][i].in[1] <== and[5][i].out;
+		states[i+1][5] <== multi_or[1][i].out;
+		and[6][i] = AND();
+		and[6][i].a <== states[i][5];
+		and[6][i].b <== eq[1][i].out;
+		states[i+1][6] <== and[6][i].out;
+		eq[6][i] = IsEqual();
+		eq[6][i].in[0] <== in[i];
+		eq[6][i].in[1] <== 99;
+		and[7][i] = AND();
+		and[7][i].a <== states[i][6];
+		multi_or[2][i] = MultiOR(2);
+		multi_or[2][i].in[0] <== eq[3][i].out;
+		multi_or[2][i].in[1] <== eq[6][i].out;
+		and[7][i].b <== multi_or[2][i].out;
+		and[8][i] = AND();
+		and[8][i].a <== states[i][7];
+		and[8][i].b <== multi_or[2][i].out;
+		multi_or[3][i] = MultiOR(2);
+		multi_or[3][i].in[0] <== and[7][i].out;
+		multi_or[3][i].in[1] <== and[8][i].out;
+		states[i+1][7] <== multi_or[3][i].out;
+		and[9][i] = AND();
+		and[9][i].a <== states[i][7];
+		and[9][i].b <== eq[4][i].out;
+		states[i+1][8] <== and[9][i].out;
+		eq[7][i] = IsEqual();
+		eq[7][i].in[0] <== in[i];
+		eq[7][i].in[1] <== 100;
+		and[10][i] = AND();
+		and[10][i].a <== states[i][8];
+		and[10][i].b <== eq[7][i].out;
+		states[i+1][9] <== and[10][i].out;
+		from_zero_enabled[i] <== MultiNOR(9)([states_tmp[i+1][1], states[i+1][2], states[i+1][3], states[i+1][4], states[i+1][5], states[i+1][6], states[i+1][7], states[i+1][8], states[i+1][9]]);
+		states[i+1][1] <== MultiOR(2)([states_tmp[i+1][1], from_zero_enabled[i] * and[0][i].out]);
+		state_changed[i].in[0] <== states[i+1][1];
+		state_changed[i].in[1] <== states[i+1][2];
+		state_changed[i].in[2] <== states[i+1][3];
+		state_changed[i].in[3] <== states[i+1][4];
+		state_changed[i].in[4] <== states[i+1][5];
+		state_changed[i].in[5] <== states[i+1][6];
+		state_changed[i].in[6] <== states[i+1][7];
+		state_changed[i].in[7] <== states[i+1][8];
+		state_changed[i].in[8] <== states[i+1][9];
+	}
+
+	component is_accepted = MultiOR(num_bytes+1);
+	for (var i = 0; i <= num_bytes; i++) {
+		is_accepted.in[i] <== states[i][9];
+	}
+	out <== is_accepted.out;
+	signal is_consecutive[msg_bytes+1][3];
+	is_consecutive[msg_bytes][2] <== 0;
+	for (var i = 0; i < msg_bytes; i++) {
+		is_consecutive[msg_bytes-1-i][0] <== states[num_bytes-i][9] * (1 - is_consecutive[msg_bytes-i][2]) + is_consecutive[msg_bytes-i][2];
+		is_consecutive[msg_bytes-1-i][1] <== state_changed[msg_bytes-i].out * is_consecutive[msg_bytes-1-i][0];
+		is_consecutive[msg_bytes-1-i][2] <== ORAnd()([(1 - from_zero_enabled[msg_bytes-i+1]), states[num_bytes-i][9], is_consecutive[msg_bytes-1-i][1]]);
+	}
+	// substrings calculated: [{(2, 3)}, {(6, 7), (7, 7)}, {(8, 9)}]
+	signal prev_states0[1][msg_bytes];
+	signal is_substr0[msg_bytes];
+	signal is_reveal0[msg_bytes];
+	signal output reveal0[msg_bytes];
+	for (var i = 0; i < msg_bytes; i++) {
+		 // the 0-th substring transitions: [(2, 3)]
+		prev_states0[0][i] <== (1 - from_zero_enabled[i+1]) * states[i+1][2];
+		is_substr0[i] <== MultiOR(1)([prev_states0[0][i] * states[i+2][3]]);
+		is_reveal0[i] <== MultiAND(3)([out, is_substr0[i], is_consecutive[i][2]]);
+		reveal0[i] <== in[i+1] * is_reveal0[i];
+	}
+	signal prev_states1[2][msg_bytes];
+	signal is_substr1[msg_bytes];
+	signal is_reveal1[msg_bytes];
+	signal output reveal1[msg_bytes];
+	for (var i = 0; i < msg_bytes; i++) {
+		 // the 1-th substring transitions: [(6, 7), (7, 7)]
+		prev_states1[0][i] <== (1 - from_zero_enabled[i+1]) * states[i+1][6];
+		prev_states1[1][i] <== (1 - from_zero_enabled[i+1]) * states[i+1][7];
+		is_substr1[i] <== MultiOR(2)([prev_states1[0][i] * states[i+2][7], prev_states1[1][i] * states[i+2][7]]);
+		is_reveal1[i] <== MultiAND(3)([out, is_substr1[i], is_consecutive[i][2]]);
+		reveal1[i] <== in[i+1] * is_reveal1[i];
+	}
+	signal prev_states2[1][msg_bytes];
+	signal is_substr2[msg_bytes];
+	signal is_reveal2[msg_bytes];
+	signal output reveal2[msg_bytes];
+	for (var i = 0; i < msg_bytes; i++) {
+		 // the 2-th substring transitions: [(8, 9)]
+		prev_states2[0][i] <== (1 - from_zero_enabled[i+1]) * states[i+1][8];
+		is_substr2[i] <== MultiOR(1)([prev_states2[0][i] * states[i+2][9]]);
+		is_reveal2[i] <== MultiAND(3)([out, is_substr2[i], is_consecutive[i][2]]);
+		reveal2[i] <== in[i+1] * is_reveal2[i];
+	}
+}
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_asterisk1_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./asterisk1_regex.circom";
+
+component main = Asterisk1Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_asterisk2_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./asterisk2_regex.circom";
+
+component main = Asterisk2Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_asterisk3_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./asterisk3_regex.circom";
+
+component main = Asterisk3Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_body_hash_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "../../circuits/common/body_hash_regex.circom";
+
+component main = BodyHashRegex(1024);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_caret1_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./caret1_regex.circom";
+
+component main = Caret1Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_caret2_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./caret2_regex.circom";
+
+component main = Caret2Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_caret3_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./caret3_regex.circom";
+
+component main = Caret3Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_caret4_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./caret4_regex.circom";
+
+component main = Caret4Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_caret5_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./caret5_regex.circom";
+
+component main = Caret5Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_dollar1_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./dollar1_regex.circom";
+
+component main = Dollar1Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_dollar2_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./dollar2_regex.circom";
+
+component main = Dollar2Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_dot1_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./dot1_regex.circom";
+
+component main = Dot1Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_dot2_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./dot2_regex.circom";
+
+component main = Dot2Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_email_addr_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "../../circuits/common/email_addr_regex.circom";
+
+component main = EmailAddrRegex(256);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_email_domain_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "../../circuits/common/email_domain_regex.circom";
+
+component main = EmailDomainRegex(256);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_from_addr_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "../../circuits/common/from_addr_regex.circom";
+
+component main = FromAddrRegex(1024);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_international_chars_decomposed.circom
+---
+
+pragma circom 2.1.5;
+
+include "./international_chars_decomposed.circom";
+// Latin-Extension=[¡-ƿ]+ Greek=[Ͱ-Ͽ]+ Cyrillic=[Ѐ-ӿ]+ Arabic=[؀-ۿ]+ Devanagari=[ऀ-ॿ]+ Hiragana&Katakana=[ぁ-ヿ]+
+component main = InternationalCharsDecomposed(128);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_invitation_code_with_prefix_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./invitation_code_with_prefix_regex.circom";
+
+component main = InvitationCodeWithPrefixRegex(256);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_message_id_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "../../circuits/common/message_id_regex.circom";
+
+component main = MessageIdRegex(256);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_negate1_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./negate1_regex.circom";
+component main = Negate1Regex(64);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_negate2_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./negate2_regex.circom";
+component main = Negate2Regex(64);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_plus1_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./plus1_regex.circom";
+
+component main = Plus1Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_plus2_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./plus2_regex.circom";
+
+component main = Plus2Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_plus3_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./plus3_regex.circom";
+
+component main = Plus3Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_plus4_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./plus4_regex.circom";
+
+component main = Plus4Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_question1_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./question1_regex.circom";
+
+component main = Question1Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_question2_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./question2_regex.circom";
+
+component main = Question2Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_question3_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./question3_regex.circom";
+
+component main = Question3Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_reveal_check1_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./reveal_check1_regex.circom";
+
+component main = RevealCheck1Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_reveal_check2_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "./reveal_check2_regex.circom";
+
+component main = RevealCheck2Regex(8);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_simple_regex_decomposed.circom
+---
+
+pragma circom 2.1.5;
+
+include "./simple_regex_decomposed.circom";
+// email was meant for @[a-zA-Z0-9_]+\.
+component main = SimpleRegexDecomposed(64);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_simple_regex.circom
+---
+
+pragma circom 2.1.5;
+include "./simple_regex.circom";
+// 1=(a|b) (2=(b|c)+ )+d
+component main = SimpleRegex(64);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_subject_all_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "../../circuits/common/subject_all_regex.circom";
+
+component main = SubjectAllRegex(256);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_timestamp_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "../../circuits/common/timestamp_regex.circom";
+
+component main = TimestampRegex(1024);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/circuits/test_to_addr_regex.circom
+---
+
+pragma circom 2.1.5;
+
+include "../../circuits/common/to_addr_regex.circom";
+
+component main = ToAddrRegex(1024);
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/asterisk.test.js
+---
+
+import circom_tester from 'circom_tester';
+import * as path from 'path';
+import { readFileSync, writeFileSync } from 'fs';
+import apis from '../../apis/pkg';
+import compiler from '../../compiler/pkg';
+const option = {
+    include: path.join(__dirname, '../../../node_modules')
+};
+const wasm_tester = circom_tester.wasm;
+
+jest.setTimeout(600000);
+describe('Asterisk Regex', () => {
+    let circuit1;
+    let circuit2;
+    let circuit3;
+    // let circuit4;
+    // let circuit5;
+    // let circuit6;
+    beforeAll(async () => {
+        writeFileSync(
+            path.join(__dirname, './circuits/asterisk1_regex.circom'),
+            compiler.genFromDecomposed(
+                readFileSync(
+                    path.join(__dirname, './circuits/asterisk1.json'),
+                    'utf8'
+                ),
+                'Asterisk1Regex'
+            )
+        );
+        circuit1 = await wasm_tester(
+            path.join(__dirname, './circuits/test_asterisk1_regex.circom'),
+            option
+        );
+
+        writeFileSync(
+            path.join(__dirname, './circuits/asterisk2_regex.circom'),
+            compiler.genFromDecomposed(
+                readFileSync(
+                    path.join(__dirname, './circuits/asterisk2.json'),
+                    'utf8'
+                ),
+                'Asterisk2Regex'
+            )
+        );
+        circuit2 = await wasm_tester(
+            path.join(__dirname, './circuits/test_asterisk2_regex.circom'),
+            option
+        );
+
+        writeFileSync(
+            path.join(__dirname, './circuits/asterisk3_regex.circom'),
+            compiler.genFromDecomposed(
+                readFileSync(
+                    path.join(__dirname, './circuits/asterisk3.json'),
+                    'utf8'
+                ),
+                'Asterisk3Regex'
+            )
+        );
+        circuit3 = await wasm_tester(
+            path.join(__dirname, './circuits/test_asterisk3_regex.circom'),
+            option
+        );
+
+        // writeFileSync(
+        //     path.join(__dirname, "./circuits/asterisk4_regex.circom"),
+        //     compiler.genFromDecomposed(
+        //         readFileSync(
+        //             path.join(__dirname, "./circuits/asterisk4.json"),
+        //             "utf8"
+        //         ),
+        //         "Asterisk4Regex"
+        //     )
+        // );
+        // circuit4 = await wasm_tester(
+        //     path.join(__dirname, "./circuits/test_asterisk4_regex.circom"),
+        //     option
+        // );
+
+        // writeFileSync(
+        //     path.join(__dirname, "./circuits/asterisk5_regex.circom"),
+        //     compiler.genFromDecomposed(
+        //         readFileSync(
+        //             path.join(__dirname, "./circuits/asterisk5.json"),
+        //             "utf8"
+        //         ),
+        //         "Asterisk5Regex"
+        //     )
+        // );
+        // circuit5 = await wasm_tester(
+        //     path.join(__dirname, "./circuits/test_asterisk5_regex.circom"),
+        //     option
+        // );
+
+        // writeFileSync(
+        //     path.join(__dirname, "./circuits/asterisk6_regex.circom"),
+        //     compiler.genFromDecomposed(
+        //         readFileSync(
+        //             path.join(__dirname, "./circuits/asterisk6.json"),
+        //             "utf8"
+        //         ),
+        //         "Asterisk6Regex"
+        //     )
+        // );
+        // circuit6 = await wasm_tester(
+        //     path.join(__dirname, "./circuits/test_asterisk6_regex.circom"),
+        //     option
+        // );
+    });
+
+    it('asterisk1 valid case 1', async () => {
+        const inputStr = `xb`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/asterisk1.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('asterisk1 valid case 2', async () => {
+        const inputStr = `xab`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/asterisk1.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('asterisk1 valid case 3', async () => {
+        const inputStr = `xaab`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/asterisk1.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('asterisk1 valid case 4', async () => {
+        const inputStr = `710xab98`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/asterisk1.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('asterisk1 invalid case 1', async () => {
+        const inputStr = `xaaa`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('asterisk1 invalid case 2', async () => {
+        const inputStr = `aaabx`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('asterisk2 valid case 1', async () => {
+        const inputStr = `aaa`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/asterisk2.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('asterisk2 valid case 2', async () => {
+        const inputStr = `ab`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/asterisk2.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('asterisk2 valid case 3', async () => {
+        const inputStr = `abbba`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/asterisk2.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('asterisk2 valid case 4', async () => {
+        const inputStr = `717abb9`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/asterisk2.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('asterisk2 invalid case 1', async () => {
+        const inputStr = `bbb`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('asterisk2 invalid case 2', async () => {
+        const inputStr = `19bd7`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('asterisk3 valid case 1', async () => {
+        const inputStr = `ab`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit3.calculateWitness(circuitInputs);
+        await circuit3.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/asterisk3.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('asterisk3 valid case 2', async () => {
+        const inputStr = `xaxxyxby`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit3.calculateWitness(circuitInputs);
+        await circuit3.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/asterisk3.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('asterisk3 invalid case 1', async () => {
+        const inputStr = `axyxyyyx`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit3.calculateWitness(circuitInputs);
+        await circuit3.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('asterisk3 invalid case 2', async () => {
+        const inputStr = `xyyxxyba`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit3.calculateWitness(circuitInputs);
+        await circuit3.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    // it("asterisk4 valid case 1", async () => {
+    //     const inputStr = `b099`;
+    //     const paddedStr = apis.padString(inputStr, 8);
+    //     const circuitInputs = {
+    //         msg: paddedStr,
+    //     };
+    //     const witness = await circuit4.calculateWitness(circuitInputs);
+    //     await circuit4.checkConstraints(witness);
+    //     expect(1n).toEqual(witness[1]);
+    //     const prefixIdxes = apis.extractSubstrIdxes(
+    //         inputStr,
+    //         readFileSync(
+    //             path.join(__dirname, "./circuits/asterisk4.json"),
+    //             "utf8"
+    //         ),false
+    //     )[0];
+    //     for (let idx = 0; idx < 8; ++idx) {
+    //         if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+    //             expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+    //         } else {
+    //             expect(0n).toEqual(witness[2 + idx]);
+    //         }
+    //     }
+    // });
+
+    // it("asterisk4 invalid case 1", async () => {
+    //     const inputStr = `192ue2iw`;
+    //     const paddedStr = apis.padString(inputStr, 8);
+    //     const circuitInputs = {
+    //         msg: paddedStr,
+    //     };
+    //     const witness = await circuit4.calculateWitness(circuitInputs);
+    //     await circuit4.checkConstraints(witness);
+    //     expect(0n).toEqual(witness[1]);
+    //     for (let idx = 0; idx < 8; ++idx) {
+    //         expect(0n).toEqual(witness[2 + idx]);
+    //     }
+    // });
+
+    // it("asterisk5 valid case 1", async () => {
+    //     const inputStr = `a`;
+    //     const paddedStr = apis.padString(inputStr, 8);
+    //     const circuitInputs = {
+    //         msg: paddedStr,
+    //     };
+    //     const witness = await circuit5.calculateWitness(circuitInputs);
+    //     await circuit5.checkConstraints(witness);
+    //     expect(1n).toEqual(witness[1]);
+    //     const prefixIdxes = apis.extractSubstrIdxes(
+    //         inputStr,
+    //         readFileSync(
+    //             path.join(__dirname, "./circuits/asterisk5.json"),
+    //             "utf8"
+    //         ),false
+    //     )[0];
+    //     for (let idx = 0; idx < 8; ++idx) {
+    //         if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+    //             expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+    //         } else {
+    //             expect(0n).toEqual(witness[2 + idx]);
+    //         }
+    //     }
+    // });
+
+    // it("asterisk5 valid case 2", async () => {
+    //     const inputStr = `218aaaa2`;
+    //     const paddedStr = apis.padString(inputStr, 8);
+    //     const circuitInputs = {
+    //         msg: paddedStr,
+    //     };
+    //     const witness = await circuit5.calculateWitness(circuitInputs);
+    //     await circuit5.checkConstraints(witness);
+    //     expect(1n).toEqual(witness[1]);
+    //     const prefixIdxes = apis.extractSubstrIdxes(
+    //         inputStr,
+    //         readFileSync(
+    //             path.join(__dirname, "./circuits/asterisk5.json"),
+    //             "utf8"
+    //         ),false
+    //     )[0];
+    //     for (let idx = 0; idx < 8; ++idx) {
+    //         if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+    //             expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+    //         } else {
+    //             expect(0n).toEqual(witness[2 + idx]);
+    //         }
+    //     }
+    // });
+
+    // it("asterisk5 invalid case 1", async () => {
+    //     const inputStr = `bbbbcccc`;
+    //     const paddedStr = apis.padString(inputStr, 8);
+    //     const circuitInputs = {
+    //         msg: paddedStr,
+    //     };
+    //     const witness = await circuit5.calculateWitness(circuitInputs);
+    //     await circuit5.checkConstraints(witness);
+    //     expect(0n).toEqual(witness[1]);
+    //     for (let idx = 0; idx < 8; ++idx) {
+    //         expect(0n).toEqual(witness[2 + idx]);
+    //     }
+    // });
+
+    // it("asterisk6 valid case 1", async () => {
+    //     const inputStr = ``;
+    //     const paddedStr = apis.padString(inputStr, 8);
+    //     const circuitInputs = {
+    //         msg: paddedStr,
+    //     };
+    //     const witness = await circuit6.calculateWitness(circuitInputs);
+    //     await circuit6.checkConstraints(witness);
+    //     expect(1n).toEqual(witness[1]);
+    //     const prefixIdxes = apis.extractSubstrIdxes(
+    //         inputStr,
+    //         readFileSync(
+    //             path.join(__dirname, "./circuits/asterisk6.json"),
+    //             "utf8"
+    //         ),false
+    //     )[0];
+    //     for (let idx = 0; idx < 8; ++idx) {
+    //         if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+    //             expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+    //         } else {
+    //             expect(0n).toEqual(witness[2 + idx]);
+    //         }
+    //     }
+    // });
+
+    // it("asterisk6 valid case 2", async () => {
+    //     const inputStr = `a`;
+    //     const paddedStr = apis.padString(inputStr, 8);
+    //     const circuitInputs = {
+    //         msg: paddedStr,
+    //     };
+    //     const witness = await circuit6.calculateWitness(circuitInputs);
+    //     await circuit6.checkConstraints(witness);
+    //     expect(1n).toEqual(witness[1]);
+    //     const prefixIdxes = apis.extractSubstrIdxes(
+    //         inputStr,
+    //         readFileSync(
+    //             path.join(__dirname, "./circuits/asterisk6.json"),
+    //             "utf8"
+    //         ),false
+    //     )[0];
+    //     for (let idx = 0; idx < 8; ++idx) {
+    //         if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+    //             expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+    //         } else {
+    //             expect(0n).toEqual(witness[2 + idx]);
+    //         }
+    //     }
+    // });
+
+    // it("asterisk6 valid case 3", async () => {
+    //     const inputStr = `1921 abw`;
+    //     const paddedStr = apis.padString(inputStr, 8);
+    //     const circuitInputs = {
+    //         msg: paddedStr,
+    //     };
+    //     const witness = await circuit6.calculateWitness(circuitInputs);
+    //     await circuit6.checkConstraints(witness);
+    //     expect(1n).toEqual(witness[1]);
+    //     const prefixIdxes = apis.extractSubstrIdxes(
+    //         inputStr,
+    //         readFileSync(
+    //             path.join(__dirname, "./circuits/asterisk6.json"),
+    //             "utf8"
+    //         ),false
+    //     )[0];
+    //     for (let idx = 0; idx < 8; ++idx) {
+    //         if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+    //             expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+    //         } else {
+    //             expect(0n).toEqual(witness[2 + idx]);
+    //         }
+    //     }
+    // });
+});
+
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/body_hash_regex.test.js
+---
+
+import circom_tester from 'circom_tester';
+import * as path from 'path';
+import { readFileSync, writeFileSync } from 'fs';
+import apis from '../../apis/pkg';
+import compiler from '../../compiler/pkg';
+const option = {
+    include: path.join(__dirname, '../../../node_modules')
+};
+const wasm_tester = circom_tester.wasm;
+
+jest.setTimeout(600000);
+describe('Bodyhash Regex', () => {
+    let circuit;
+    beforeAll(async () => {
+        const email_addr_json = readFileSync(
+            path.join(__dirname, '../circuits/common/body_hash.json'),
+            'utf8'
+        );
+        const circom = compiler.genFromDecomposed(
+            email_addr_json,
+            'BodyHashRegex'
+        );
+        writeFileSync(
+            path.join(__dirname, '../circuits/common/body_hash_regex.circom'),
+            circom
+        );
+
+        circuit = await wasm_tester(
+            path.join(__dirname, './circuits/test_body_hash_regex.circom'),
+            option
+        );
+    });
+
+    it('bodyhash in the header', async () => {
+        const signatureField = `dkim-signature:v=1; a=rsa-sha256; c=relaxed/relaxed; d=gmail.com; s=20230601; t=1694989812; x=1695594612; dara=google.com; h=to:subject:message-id:date:from:mime-version:from:to:cc:subject :date:message-id:reply-to; bh=BWETwQ9JDReS4GyR2v2TTR8Bpzj9ayumsWQJ3q7vehs=; b=`;
+        const paddedStr = apis.padString(signatureField, 1024);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit.calculateWitness(circuitInputs);
+        await circuit.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            signatureField,
+            readFileSync(
+                path.join(__dirname, '../circuits/common/body_hash.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 1024; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('bodyhash after new line', async () => {
+        const signatureField = `\r\ndkim-signature:v=1; a=rsa-sha256; c=relaxed/relaxed; d=gmail.com; s=20230601; t=1694989812; x=1695594612; dara=google.com; h=to:subject:message-id:date:from:mime-version:from:to:cc:subject :date:message-id:reply-to; bh=BWETwQ9JDReS4GyR2v2TTR8Bpzj9ayumsWQJ3q7vehs=; b=`;
+        const paddedStr = apis.padString(signatureField, 1024);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit.calculateWitness(circuitInputs);
+        await circuit.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            signatureField,
+            readFileSync(
+                path.join(__dirname, '../circuits/common/body_hash.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 1024; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('bodyhash in the invalid field', async () => {
+        const signatureField = `\r\nto: dkim-signature:v=1; a=rsa-sha256; c=relaxed/relaxed; d=gmail.com; s=20230601; t=1694989812; x=1695594612; dara=google.com; h=to:subject:message-id:date:from:mime-version:from:to:cc:subject :date:message-id:reply-to; bh=BWETwQ9JDReS4GyR2v2TTR8Bpzj9ayumsWQJ3q7vehs=; b=`;
+        const paddedStr = apis.padString(signatureField, 1024);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit.calculateWitness(circuitInputs);
+        await circuit.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 1024; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('invalid bodyhash with 255', async () => {
+        const signatureField = `dkim-signature:v=1; a=rsa-sha256; c=relaxed/relaxed; d=gmail.com; s=20230601; t=1694989812; x=1695594612; dara=google.com; h=to:subject:message-id:date:from:mime-version:from:to:cc:subject :date:message-id:reply-to; bh=BWETwQ9JDReS4GyR2v2TTR8Bpzj9ayumsWQJ3q7vehs=; b=`;
+        let paddedStr = apis.padString(signatureField, 1022);
+        paddedStr.unshift(49);
+        paddedStr.unshift(255);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        async function failFn() {
+            const witness = await circuit.calculateWitness(circuitInputs);
+            await circuit.checkConstraints(witness);
+        }
+        await expect(failFn).rejects.toThrow();
+    });
+});
+
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/caret.test.js
+---
+
+import circom_tester from 'circom_tester';
+import * as path from 'path';
+import { readFileSync, writeFileSync } from 'fs';
+import apis from '../../apis/pkg';
+import compiler from '../../compiler/pkg';
+const option = {
+    include: path.join(__dirname, '../../../node_modules')
+};
+const wasm_tester = circom_tester.wasm;
+
+jest.setTimeout(600000);
+describe('Caret Regex', () => {
+    let circuit1;
+    let circuit2;
+    let circuit3;
+    let circuit4;
+    let circuit5;
+    beforeAll(async () => {
+        writeFileSync(
+            path.join(__dirname, './circuits/caret1_regex.circom'),
+            compiler.genFromDecomposed(
+                readFileSync(
+                    path.join(__dirname, './circuits/caret1.json'),
+                    'utf8'
+                ),
+                'Caret1Regex'
+            )
+        );
+        circuit1 = await wasm_tester(
+            path.join(__dirname, './circuits/test_caret1_regex.circom'),
+            option
+        );
+
+        writeFileSync(
+            path.join(__dirname, './circuits/caret2_regex.circom'),
+            compiler.genFromDecomposed(
+                readFileSync(
+                    path.join(__dirname, './circuits/caret2.json'),
+                    'utf8'
+                ),
+                'Caret2Regex'
+            )
+        );
+        circuit2 = await wasm_tester(
+            path.join(__dirname, './circuits/test_caret2_regex.circom'),
+            option
+        );
+
+        writeFileSync(
+            path.join(__dirname, './circuits/caret3_regex.circom'),
+            compiler.genFromDecomposed(
+                readFileSync(
+                    path.join(__dirname, './circuits/caret3.json'),
+                    'utf8'
+                ),
+                'Caret3Regex'
+            )
+        );
+        circuit3 = await wasm_tester(
+            path.join(__dirname, './circuits/test_caret3_regex.circom'),
+            option
+        );
+
+        writeFileSync(
+            path.join(__dirname, './circuits/caret4_regex.circom'),
+            compiler.genFromDecomposed(
+                readFileSync(
+                    path.join(__dirname, './circuits/caret4.json'),
+                    'utf8'
+                ),
+                'Caret4Regex'
+            )
+        );
+        circuit4 = await wasm_tester(
+            path.join(__dirname, './circuits/test_caret4_regex.circom'),
+            option
+        );
+
+        writeFileSync(
+            path.join(__dirname, './circuits/caret5_regex.circom'),
+            compiler.genFromDecomposed(
+                readFileSync(
+                    path.join(__dirname, './circuits/caret5.json'),
+                    'utf8'
+                ),
+                'Caret5Regex'
+            )
+        );
+        circuit5 = await wasm_tester(
+            path.join(__dirname, './circuits/test_caret5_regex.circom'),
+            option
+        );
+    });
+
+    it('caret1 valid case 1', async () => {
+        const inputStr = `a`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/caret1.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('caret1 valid case 2', async () => {
+        const inputStr = `abnjknda`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/caret1.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('caret1 invalid case 1', async () => {
+        const inputStr = `ba`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('caret1 invalid case 2', async () => {
+        const inputStr = `bav`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('caret2 valid case 1', async () => {
+        const inputStr = `abc`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/caret2.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('caret2 valid case 2', async () => {
+        const inputStr = `bca`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/caret2.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('caret2 valid case 3', async () => {
+        const inputStr = `cab`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/caret2.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('caret2 invalid case 1', async () => {
+        const inputStr = `7abc9mna`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('caret3 valid case 1', async () => {
+        const inputStr = `bb817267`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit3.calculateWitness(circuitInputs);
+        await circuit3.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/caret3.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('caret3 valid case 2', async () => {
+        const inputStr = `818abbb9`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit3.calculateWitness(circuitInputs);
+        await circuit3.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/caret3.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('caret3 invalid case 1', async () => {
+        const inputStr = `81b`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit3.calculateWitness(circuitInputs);
+        await circuit3.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('caret4 valid case 1', async () => {
+        const inputStr = `xabaaabb`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit4.calculateWitness(circuitInputs);
+        await circuit4.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/caret4.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('caret4 valid case 2', async () => {
+        const inputStr = `xbaab82a`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit4.calculateWitness(circuitInputs);
+        await circuit4.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/caret4.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('caret4 valid case 3', async () => {
+        const inputStr = `7w1\nxabb`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit4.calculateWitness(circuitInputs);
+        await circuit4.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/caret4.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('caret4 valid case 4', async () => {
+        const inputStr = `7w\nxbbb9`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit4.calculateWitness(circuitInputs);
+        await circuit4.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/caret4.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('caret4 invalid case 1', async () => {
+        const inputStr = `7w1nxaba`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit4.calculateWitness(circuitInputs);
+        await circuit4.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('caret4 invalid case 2', async () => {
+        const inputStr = `abba\nx`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit4.calculateWitness(circuitInputs);
+        await circuit4.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('caret5 valid case 1', async () => {
+        const inputStr = `xdefabc1`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit5.calculateWitness(circuitInputs);
+        await circuit5.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/caret5.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('caret5 valid case 2', async () => {
+        const inputStr = `9\nx9eabc`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit5.calculateWitness(circuitInputs);
+        await circuit5.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/caret5.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('caret5 invalid case 1', async () => {
+        const inputStr = `xabc`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit5.calculateWitness(circuitInputs);
+        await circuit5.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('caret5 invalid case 2', async () => {
+        const inputStr = `1\ndef`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit5.calculateWitness(circuitInputs);
+        await circuit5.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('caret5 invalid case 3', async () => {
+        const inputStr = `a8abc8`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit5.calculateWitness(circuitInputs);
+        await circuit5.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('caret5 invalid case 4', async () => {
+        const inputStr = `71\na81ma`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit5.calculateWitness(circuitInputs);
+        await circuit5.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+});
+
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/dollar.test.js
+---
+
+import circom_tester from 'circom_tester';
+import * as path from 'path';
+import { readFileSync, writeFileSync } from 'fs';
+import apis from '../../apis/pkg';
+import compiler from '../../compiler/pkg';
+const option = {
+    include: path.join(__dirname, '../../../node_modules')
+};
+const wasm_tester = circom_tester.wasm;
+
+jest.setTimeout(600000);
+describe('Caret Regex', () => {
+    let circuit1;
+    let circuit2;
+    beforeAll(async () => {
+        writeFileSync(
+            path.join(__dirname, './circuits/dollar1_regex.circom'),
+            compiler.genFromDecomposed(
+                readFileSync(
+                    path.join(__dirname, './circuits/dollar1.json'),
+                    'utf8'
+                ),
+                'Dollar1Regex'
+            )
+        );
+        circuit1 = await wasm_tester(
+            path.join(__dirname, './circuits/test_dollar1_regex.circom'),
+            option
+        );
+
+        writeFileSync(
+            path.join(__dirname, './circuits/dollar2_regex.circom'),
+            compiler.genFromDecomposed(
+                readFileSync(
+                    path.join(__dirname, './circuits/dollar2.json'),
+                    'utf8'
+                ),
+                'Dollar2Regex'
+            )
+        );
+        circuit2 = await wasm_tester(
+            path.join(__dirname, './circuits/test_dollar2_regex.circom'),
+            option
+        );
+    });
+
+    it('dollar1 valid case 1', async () => {
+        const inputStr = `ab`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/dollar1.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('dollar1 invalid case 1', async () => {
+        const inputStr = `abg`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('dollar1 invalid case 2', async () => {
+        const inputStr = `18abcg`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('dollar2 valid case 1', async () => {
+        const inputStr = `xab`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/dollar2.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('dollar2 valid case 2', async () => {
+        const inputStr = `ak\nxab`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(
+                path.join(__dirname, './circuits/dollar2.json'),
+                'utf8'
+            ),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    it('dollar2 invalid case 1', async () => {
+        const inputStr = `abg`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('dollar2 invalid case 2', async () => {
+        const inputStr = `\nabg`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('dollar2 invalid case 2', async () => {
+        const inputStr = `\nabg`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+});
+
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/dot.test.js
+---
+
+import circom_tester from 'circom_tester';
+import * as path from 'path';
+import { readFileSync, writeFileSync } from 'fs';
+import apis from '../../apis/pkg';
+import compiler from '../../compiler/pkg';
+const option = {
+    include: path.join(__dirname, '../../../node_modules')
+};
+const wasm_tester = circom_tester.wasm;
+
+jest.setTimeout(600000);
+describe('Dot Regex', () => {
+    let circuit1;
+    let circuit2;
+    beforeAll(async () => {
+        writeFileSync(
+            path.join(__dirname, './circuits/dot1_regex.circom'),
+            compiler.genFromDecomposed(
+                readFileSync(
+                    path.join(__dirname, './circuits/dot1.json'),
+                    'utf8'
+                ),
+                'Dot1Regex'
+            )
+        );
+        circuit1 = await wasm_tester(
+            path.join(__dirname, './circuits/test_dot1_regex.circom'),
+            option
+        );
+
+        writeFileSync(
+            path.join(__dirname, './circuits/dot2_regex.circom'),
+            compiler.genFromDecomposed(
+                readFileSync(
+                    path.join(__dirname, './circuits/dot2.json'),
+                    'utf8'
+                ),
+                'Dot2Regex'
+            )
+        );
+        circuit2 = await wasm_tester(
+            path.join(__dirname, './circuits/test_dot2_regex.circom'),
+            option
+        );
+    });
+
+    it('dot1 valid case 1', async () => {
+        const inputStr = `a`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit1.calculateWitness(circuitInputs);
+        await circuit1.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(path.join(__dirname, './circuits/dot1.json'), 'utf8'),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    // it("dot1 valid case 2", async () => {
+    //     const inputStr = `aaaa`;
+    //     const paddedStr = apis.padString(inputStr, 8);
+    //     const circuitInputs = {
+    //         msg: paddedStr,
+    //     };
+    //     const witness = await circuit1.calculateWitness(circuitInputs);
+    //     await circuit1.checkConstraints(witness);
+    //     expect(1n).toEqual(witness[1]);
+    //     const prefixIdxes = apis.extractSubstrIdxes(
+    //         inputStr,
+    //         readFileSync(
+    //             path.join(__dirname, "./circuits/dot1.json"),
+    //             "utf8"
+    //         ),false
+    //     )[0];
+    //     for (let idx = 0; idx < 8; ++idx) {
+    //         if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+    //             expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+    //         } else {
+    //             expect(0n).toEqual(witness[2 + idx]);
+    //         }
+    //     }
+    // });
+
+    it('dot2 valid case 1', async () => {
+        const inputStr = `a6b`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(1n).toEqual(witness[1]);
+        const prefixIdxes = apis.extractSubstrIdxes(
+            inputStr,
+            readFileSync(path.join(__dirname, './circuits/dot2.json'), 'utf8'),
+            false
+        )[0];
+        for (let idx = 0; idx < 8; ++idx) {
+            if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+                expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+            } else {
+                expect(0n).toEqual(witness[2 + idx]);
+            }
+        }
+    });
+
+    // it("dot2 valid case 2", async () => {
+    //     const inputStr = `aa6b`;
+    //     const paddedStr = apis.padString(inputStr, 8);
+    //     const circuitInputs = {
+    //         msg: paddedStr,
+    //     };
+    //     const witness = await circuit2.calculateWitness(circuitInputs);
+    //     await circuit2.checkConstraints(witness);
+    //     expect(1n).toEqual(witness[1]);
+    //     const prefixIdxes = apis.extractSubstrIdxes(
+    //         inputStr,
+    //         readFileSync(
+    //             path.join(__dirname, "./circuits/dot2.json"),
+    //             "utf8"
+    //         ),false
+    //     )[0];
+    //     for (let idx = 0; idx < 8; ++idx) {
+    //         if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+    //             expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+    //         } else {
+    //             expect(0n).toEqual(witness[2 + idx]);
+    //         }
+    //     }
+    // });
+
+    it('dot2 invalid case 1', async () => {
+        const inputStr = `819nc8b8`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+
+    it('dot2 invalid case 2', async () => {
+        const inputStr = `78aa6cc8`;
+        const paddedStr = apis.padString(inputStr, 8);
+        const circuitInputs = {
+            msg: paddedStr
+        };
+        const witness = await circuit2.calculateWitness(circuitInputs);
+        await circuit2.checkConstraints(witness);
+        expect(0n).toEqual(witness[1]);
+        for (let idx = 0; idx < 8; ++idx) {
+            expect(0n).toEqual(witness[2 + idx]);
+        }
+    });
+});
+
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/email_addr.test.js
+---
+
+import circom_tester from "circom_tester";
+import * as path from "path";
+import { readFileSync, writeFileSync } from "fs";
+import apis from "../../apis/pkg";
+import compiler from "../../compiler/pkg";
+const option = {
+  include: path.join(__dirname, "../../../node_modules"),
+};
+const wasm_tester = circom_tester.wasm;
+
+jest.setTimeout(120000);
+describe("Email Address Regex", () => {
+  let circuit;
+  beforeAll(async () => {
+    const email_addr_json = readFileSync(
+      path.join(__dirname, "../circuits/common/email_addr.json"),
+      "utf8"
+    );
+    const circom = compiler.genFromDecomposed(
+      email_addr_json,
+      "EmailAddrRegex"
+    );
+    writeFileSync(
+      path.join(__dirname, "../circuits/common/email_addr_regex.circom"),
+      circom
+    );
+    circuit = await wasm_tester(
+      path.join(__dirname, "./circuits/test_email_addr_regex.circom"),
+      option
+    );
+  });
+
+  it("only an email address", async () => {
+    const emailAddr = "suegamisora@gmail.com";
+    const paddedStr = apis.padString(emailAddr, 256);
+    const circuitInputs = {
+      msg: paddedStr,
+    };
+    const witness = await circuit.calculateWitness(circuitInputs);
+    await circuit.checkConstraints(witness);
+    expect(1n).toEqual(witness[1]);
+    const prefixIdxes = apis.extractEmailAddrIdxes(emailAddr)[0];
+    for (let idx = 0; idx < 256; ++idx) {
+      if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+        expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+      } else {
+        expect(0n).toEqual(witness[2 + idx]);
+      }
+    }
+  });
+
+  it("with a prefix", async () => {
+    const prefix = "subject:";
+    const emailAddr = "suegamisora@gmail.com";
+    const string = prefix + emailAddr;
+    const paddedStr = apis.padString(string, 256);
+    const circuitInputs = {
+      msg: paddedStr,
+    };
+    const witness = await circuit.calculateWitness(circuitInputs);
+    await circuit.checkConstraints(witness);
+    expect(1n).toEqual(witness[1]);
+    const prefixIdxes = apis.extractEmailAddrIdxes(string)[0];
+    for (let idx = 0; idx < 256; ++idx) {
+      if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+        expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+      } else {
+        expect(0n).toEqual(witness[2 + idx]);
+      }
+    }
+  });
+
+  it("@ inside the name part", async () => {
+    const prefix = "subject:";
+    const emailAddr = "suegamisora@gmail.com@dummy.com";
+    const string = prefix + emailAddr;
+    const paddedStr = apis.padString(string, 256);
+    const circuitInputs = {
+      msg: paddedStr,
+    };
+    const witness = await circuit.calculateWitness(circuitInputs);
+    await circuit.checkConstraints(witness);
+    expect(1n).toEqual(witness[1]);
+    const prefixIdxes = apis.extractEmailAddrIdxes(string)[0];
+    for (let idx = 0; idx < 256; ++idx) {
+      if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+        expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+      } else {
+        expect(0n).toEqual(witness[2 + idx]);
+      }
+    }
+  });
+
+  it("starts from @", async () => {
+    const prefix = "subject:";
+    const emailAddr = "@gmail.com@dummy.com";
+    const string = prefix + emailAddr;
+    const paddedStr = apis.padString(string, 256);
+    const circuitInputs = {
+      msg: paddedStr,
+    };
+    const witness = await circuit.calculateWitness(circuitInputs);
+    await circuit.checkConstraints(witness);
+    expect(1n).toEqual(witness[1]);
+    const prefixIdxes = apis.extractEmailAddrIdxes(string)[0];
+    for (let idx = 0; idx < 256; ++idx) {
+      if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+        expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+      } else {
+        expect(0n).toEqual(witness[2 + idx]);
+      }
+    }
+  });
+});
+
+
+
+---
+File: /@zk-email/zk-regex-circom/tests/email_domain.test.js
+---
+
+import circom_tester from "circom_tester";
+import * as path from "path";
+import { readFileSync, writeFileSync } from "fs";
+import apis from "../../apis/pkg";
+import compiler from "../../compiler/pkg";
+const option = {
+  include: path.join(__dirname, "../../../node_modules"),
+};
+const wasm_tester = circom_tester.wasm;
+
+jest.setTimeout(120000);
+describe("Email Domain Regex", () => {
+  let circuit;
+  beforeAll(async () => {
+    const email_addr_json = readFileSync(
+      path.join(__dirname, "../circuits/common/email_domain.json"),
+      "utf8"
+    );
+    const circom = compiler.genFromDecomposed(
+      email_addr_json,
+      "EmailDomainRegex"
+    );
+    writeFileSync(
+      path.join(__dirname, "../circuits/common/email_domain_regex.circom"),
+      circom
+    );
+    circuit = await wasm_tester(
+      path.join(__dirname, "./circuits/test_email_domain_regex.circom"),
+      option
+    );
+  });
+
+  it("test a regex of an email domain", async () => {
+    const emailAddr = "suegamisora@gmail.com";
+    const paddedStr = apis.padString(emailAddr, 256);
+    const circuitInputs = {
+      msg: paddedStr,
+    };
+    const witness = await circuit.calculateWitness(circuitInputs);
+    await circuit.checkConstraints(witness);
+    expect(1n).toEqual(witness[1]);
+    const prefixIdxes = apis.extractEmailDomainIdxes(emailAddr)[0];
+    for (let idx = 0; idx < 256; ++idx) {
+      if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+        expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+      } else {
+        expect(0n).toEqual(witness[2 + idx]);
+      }
+    }
+  });
+
+  it("@ inside the name part", async () => {
+    const emailAddr = "suegamisora@gmail.com@dummy.com";
+    const paddedStr = apis.padString(emailAddr, 256);
+    const circuitInputs = {
+      msg: paddedStr,
+    };
+    const witness = await circuit.calculateWitness(circuitInputs);
+    await circuit.checkConstraints(witness);
+    expect(1n).toEqual(witness[1]);
+    const prefixIdxes = apis.extractEmailDomainIdxes(emailAddr)[0];
+    expect("gmail.com@dummy.com").toEqual(emailAddr.slice(prefixIdxes[0], prefixIdxes[1]));
+    for (let idx = 0; idx < 256; ++idx) {
+      if (idx >= prefixIdxes[0] && idx < prefixIdxes[1]) {
+        expect(BigInt(paddedStr[idx])).toEqual(witness[2 + idx]);
+      } else {
+        expect(0n).toEqual(witness[2 + idx]);
+      }
+    }
+  });
+
+  it("starts from @", async () => {
+    const emailAddr = "@gmail.com@dummy.com";
+    const paddedStr = apis.padString(emailAddr, 256);
+    const circuitInputs = {
+      msg: paddedStr,
+    };

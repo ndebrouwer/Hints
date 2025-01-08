@@ -1,0 +1,2500 @@
+export declare const parseHeaders: (buf: Buffer) => {
+    parsed: {
+        key: string | null;
+        casedKey: string | undefined;
+        line: Buffer;
+    }[];
+    original: Buffer;
+};
+export declare const getSigningHeaderLines: (parsedHeaders: Parsed[], fieldNames: string | string[], verify: boolean) => {
+    keys: string;
+    headers: {
+        key: string | null;
+        casedKey: string | undefined;
+        line: Buffer;
+    }[];
+};
+/**
+ * Generates `DKIM-Signature: ...` header for selected values
+ * @param {Object} values
+ */
+export declare const formatSignatureHeaderLine: (type: SignatureType, values: Record<string, string | boolean>, folded: boolean) => string;
+export declare const getPublicKey: (type: string, name: string, minBitLength: number, resolver: (...args: [name: string, type: string]) => Promise<any>) => Promise<{
+    publicKey: Buffer;
+    rr: any;
+    modulusLength: number;
+}>;
+export declare const escapePropValue: (value: string) => string;
+export declare const escapeCommentValue: (value: string) => string;
+export declare const formatAuthHeaderRow: (method: string, status: Record<string, any>) => string;
+export declare const formatRelaxedLine: (line: Buffer | string, suffix?: string) => Buffer;
+export declare const formatDomain: (domain: string) => string;
+export declare const getAlignment: (fromDomain: string, domainList: string[], strict?: boolean) => string | false;
+export declare const validateAlgorithm: (algorithm: string, strict: boolean) => void;
+export declare class CustomError extends Error {
+    code: string;
+    rr: string;
+    constructor(message: string, code: string, rr?: string);
+}
+export { parseDkimHeaders };
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/mailauth/tools.js
+---
+
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.parseDkimHeaders = exports.CustomError = exports.validateAlgorithm = exports.getAlignment = exports.formatDomain = exports.formatRelaxedLine = exports.formatAuthHeaderRow = exports.escapeCommentValue = exports.escapePropValue = exports.getPublicKey = exports.formatSignatureHeaderLine = exports.getSigningHeaderLines = exports.parseHeaders = exports.writeToStream = exports.defaultDKIMFieldNames = void 0;
+// @ts-ignore
+const libmime_1 = __importDefault(require("libmime"));
+// @ts-ignore
+const psl_1 = __importDefault(require("psl"));
+const timers_1 = require("timers");
+const node_forge_1 = require("node-forge");
+const punycode_1 = __importDefault(require("punycode"));
+const crypto_1 = __importDefault(require("crypto"));
+const parse_dkim_headers_1 = __importDefault(require("./parse-dkim-headers"));
+exports.parseDkimHeaders = parse_dkim_headers_1.default;
+const IS_BROWSER = typeof window !== 'undefined';
+exports.defaultDKIMFieldNames = 'From:Sender:Reply-To:Subject:Date:Message-ID:To:' +
+    'Cc:MIME-Version:Content-Type:Content-Transfer-Encoding:Content-ID:' +
+    'Content-Description:Resent-Date:Resent-From:Resent-Sender:' +
+    'Resent-To:Resent-Cc:Resent-Message-ID:In-Reply-To:References:' +
+    'List-Id:List-Help:List-Unsubscribe:List-Subscribe:List-Post:' +
+    'List-Owner:List-Archive:BIMI-Selector';
+const keyOrderingDKIM = ['v', 'a', 'c', 'd', 'h', 'i', 'l', 'q', 's', 't', 'x', 'z', 'bh', 'b'];
+const writeToStream = async (stream, input, chunkSize = 0) => {
+    chunkSize = chunkSize || 64 * 1024;
+    if (typeof input === 'string') {
+        input = Buffer.from(input);
+    }
+    return new Promise((resolve, reject) => {
+        if (typeof input?.on === 'function') {
+            // pipe as stream
+            console.log('pipe');
+            input.pipe(stream);
+            input.on('error', reject);
+        }
+        else {
+            let pos = 0;
+            let writeChunk = () => {
+                if (pos >= input.length) {
+                    return stream.end();
+                }
+                let chunk;
+                if (pos + chunkSize >= input.length) {
+                    chunk = input.subarray(pos);
+                }
+                else {
+                    chunk = input.subarray(pos, pos + chunkSize);
+                }
+                pos += chunk.length;
+                if (stream.write(chunk) === false) {
+                    stream.once('drain', () => writeChunk());
+                    return;
+                }
+                (0, timers_1.setImmediate)(writeChunk);
+            };
+            (0, timers_1.setImmediate)(writeChunk);
+        }
+        stream.on('end', resolve);
+        stream.on('finish', resolve);
+        stream.on('error', reject);
+    });
+};
+exports.writeToStream = writeToStream;
+const parseHeaders = (buf) => {
+    let rows = buf
+        .toString('binary')
+        .replace(/[\r\n]+$/, '')
+        .split(/\r?\n/)
+        .map((row) => [row]);
+    for (let i = rows.length - 1; i >= 0; i--) {
+        if (i > 0 && /^\s/.test(rows[i][0])) {
+            rows[i - 1] = rows[i - 1].concat(rows[i]);
+            rows.splice(i, 1);
+        }
+    }
+    const mappedRows = rows.map((row) => {
+        const str = row.join('\r\n');
+        let key = str.match(/^[^:]+/);
+        let casedKey;
+        if (key) {
+            casedKey = key[0].trim();
+            key = casedKey.toLowerCase();
+        }
+        return { key, casedKey, line: Buffer.from(str, 'binary') };
+    });
+    return { parsed: mappedRows, original: buf };
+};
+exports.parseHeaders = parseHeaders;
+const getSigningHeaderLines = (parsedHeaders, fieldNames, verify) => {
+    fieldNames = (typeof fieldNames === 'string' ? fieldNames : exports.defaultDKIMFieldNames)
+        .split(':')
+        .map((key) => key.trim().toLowerCase())
+        .filter((key) => key);
+    let signingList = [];
+    if (verify) {
+        let parsedList = [].concat(parsedHeaders);
+        for (let fieldName of fieldNames) {
+            for (let i = parsedList.length - 1; i >= 0; i--) {
+                let header = parsedList[i];
+                if (fieldName === header.key) {
+                    signingList.push(header);
+                    parsedList.splice(i, 1);
+                    break;
+                }
+            }
+        }
+    }
+    else {
+        for (let i = parsedHeaders.length - 1; i >= 0; i--) {
+            let header = parsedHeaders[i];
+            if (fieldNames.includes(header.key ?? '')) {
+                signingList.push(header);
+            }
+        }
+    }
+    return {
+        keys: signingList.map((entry) => entry.casedKey).join(': '),
+        headers: signingList,
+    };
+};
+exports.getSigningHeaderLines = getSigningHeaderLines;
+/**
+ * Generates `DKIM-Signature: ...` header for selected values
+ * @param {Object} values
+ */
+const formatSignatureHeaderLine = (type, values, folded) => {
+    type = (type ?? '').toString().toUpperCase();
+    let keyOrdering, headerKey;
+    switch (type) {
+        case 'DKIM':
+            headerKey = 'DKIM-Signature';
+            keyOrdering = keyOrderingDKIM;
+            values = Object.assign({
+                v: 1,
+                t: Math.round(Date.now() / 1000),
+                q: 'dns/txt',
+            }, values);
+            break;
+        case 'ARC':
+        case 'AS':
+            throw Error('err');
+        default:
+            throw new Error('Unknown Signature type');
+    }
+    const header = `${headerKey}: ` +
+        Object.keys(values)
+            .filter((key) => values[key] !== false &&
+            typeof values[key] !== 'undefined' &&
+            values.key !== null &&
+            keyOrdering.includes(key))
+            .sort((a, b) => keyOrdering.indexOf(a) - keyOrdering.indexOf(b))
+            .map((key) => {
+            let val = values[key] ?? '';
+            if (key === 'b' && folded && val) {
+                // fold signature value
+                return `${key}=${val}`.replace(/.{75}/g, '$& ').trim();
+            }
+            if (['d', 's'].includes(key) && typeof val === 'string') {
+                try {
+                    // convert to A-label if needed
+                    val = punycode_1.default.toASCII(val);
+                }
+                catch (err) {
+                    // ignore
+                }
+            }
+            if (key === 'i' && type === 'DKIM' && typeof val === 'string') {
+                let atPos = val.indexOf('@');
+                if (atPos >= 0) {
+                    let domainPart = val.substr(atPos + 1);
+                    try {
+                        // convert to A-label if needed
+                        domainPart = punycode_1.default.toASCII(domainPart);
+                    }
+                    catch (err) {
+                        // ignore
+                    }
+                    val = val.substr(0, atPos + 1) + domainPart;
+                }
+            }
+            return `${key}=${val}`;
+        })
+            .join('; ');
+    if (folded) {
+        return libmime_1.default.foldLines(header);
+    }
+    return header;
+};
+exports.formatSignatureHeaderLine = formatSignatureHeaderLine;
+// from https://developers.google.com/web/updates/2012/06/How-to-convert-ArrayBuffer-to-and-from-String
+function str2ab(str) {
+    const buf = new ArrayBuffer(str.length);
+    const bufView = new Uint8Array(buf);
+    for (let i = 0, strLen = str.length; i < strLen; i++) {
+        bufView[i] = str.charCodeAt(i);
+    }
+    return buf;
+}
+function importRsaKey(pem) {
+    // fetch the part of the PEM string between header and footer
+    const pemHeader = '-----BEGIN PUBLIC KEY-----';
+    const pemFooter = '-----END PUBLIC KEY-----';
+    const pemContents = pem.substring(pemHeader.length, pem.length - pemFooter.length);
+    // base64 decode the string to get the binary data
+    const binaryDerString = window.atob(pemContents);
+    // convert from a binary string to an ArrayBuffer
+    const binaryDer = str2ab(binaryDerString);
+    return window.crypto.subtle.importKey('spki', binaryDer, {
+        name: 'RSA-OAEP',
+        hash: 'SHA-256',
+    }, true, ['encrypt']);
+}
+const getPublicKey = async (type, name, minBitLength, resolver) => {
+    minBitLength = minBitLength || 1024;
+    let list = await resolver(name, 'TXT');
+    let rr = list &&
+        []
+            .concat(list[0] || [])
+            .join('')
+            .replaceAll(/\s+/g, '')
+            .replaceAll('"', '');
+    if (rr) {
+        // prefix value for parsing as there is no default value
+        let entry = (0, parse_dkim_headers_1.default)('DNS: TXT;' + rr);
+        const publicKeyValue = entry?.parsed?.p?.value;
+        //'v=DKIM1;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwe34ubzrMzM9sT0XVkcc3UXd7W+EHCyHoqn70l2AxXox52lAZzH/UnKwAoO+5qsuP7T9QOifIJ9ddNH9lEQ95Y/GdHBsPLGdgSJIs95mXNxscD6MSyejpenMGL9TPQAcxfqY5xPViZ+1wA1qcryjdZKRqf1f4fpMY+x3b8k7H5Qyf/Smz0sv4xFsx1r+THNIz0rzk2LO3GvE0f1ybp6P+5eAelYU4mGeZQqsKw/eB20I3jHWEyGrXuvzB67nt6ddI+N2eD5K38wg/aSytOsb5O+bUSEe7P0zx9ebRRVknCD6uuqG3gSmQmttlD5OrMWSXzrPIXe8eTBaaPd+e/jfxwIDAQAB'
+        // v=DKIM1;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwe34ubzrMzM9sT0XVkcc3UXd7W+EHCyHoqn70l2AxXox52lAZzH/UnKwAoO+5qsuP7T9QOifIJ9ddNH9lEQ95Y/GdHBsPLGdgSJIs95mXNxscD6MSyejpenMGL9TPQAcxfqY5xPViZ+1wA1qcr""yjdZKRqf1f4fpMY+x3b8k7H5Qyf/Smz0sv4xFsx1r+THNIz0rzk2LO3GvE0f1ybp6P+5eAelYU4mGeZQqsKw/eB20I3jHWEyGrXuvzB67nt6ddI+N2eD5K38wg/aSytOsb5O+bUSEe7P0zx9ebRRVknCD6uuqG3gSmQmttlD5OrMWSXzrPIXe8eTBaaPd+e/jfxwIDAQAB
+        if (!publicKeyValue) {
+            const err = new CustomError('Missing key value', 'EINVALIDVAL', rr);
+            throw err;
+        }
+        /*let validation = base64Schema.validate(publicKeyValue);
+            if (validation.error) {
+                throw new Error('Invalid base64 format for public key');
+                err.code = 'EINVALIDVAL';
+                err.rr = rr;
+                err.details = validation.error;
+                throw err;
+            }*/
+        if (type === 'DKIM' &&
+            entry?.parsed?.v &&
+            (entry?.parsed?.v?.value || '').toString().toLowerCase().trim() !== 'dkim1') {
+            const err = new CustomError('Unknown key version', 'EINVALIDVER', rr);
+            throw err;
+        }
+        let paddingNeeded = publicKeyValue.length % 4 ? 4 - (publicKeyValue.length % 4) : 0;
+        const publicKeyPem = Buffer.from(`-----BEGIN PUBLIC KEY-----\n${(publicKeyValue + '='.repeat(paddingNeeded)).replace(/.{64}/g, '$&\n')}\n-----END PUBLIC KEY-----`);
+        let publicKeyObj;
+        if (!IS_BROWSER) {
+            publicKeyObj = crypto_1.default.createPublicKey({
+                key: publicKeyPem,
+                format: 'pem',
+            });
+        }
+        else {
+            publicKeyObj = await importRsaKey(publicKeyPem.toString());
+        }
+        let keyType;
+        if (!IS_BROWSER) {
+            keyType = publicKeyObj.asymmetricKeyType;
+        }
+        else {
+            keyType = publicKeyObj.algorithm.name.split('-')[0].toLowerCase();
+        }
+        if (!['rsa', 'ed25519'].includes(keyType ?? '') ||
+            (entry?.parsed?.k && entry?.parsed?.k?.value?.toLowerCase() !== keyType)) {
+            throw new CustomError('Unknown key type (${keyType})', 'EINVALIDTYPE', rr);
+        }
+        let modulusLength;
+        if (publicKeyObj.algorithm) {
+            modulusLength = publicKeyObj.algorithm?.modulusLength;
+        }
+        else {
+            // fall back to node-forge
+            const pubKeyData = node_forge_1.pki.publicKeyFromPem(publicKeyPem.toString());
+            // const pubKeyData = CryptoJS.parseKey(publicKeyPem.toString(), 'pem');
+            modulusLength = pubKeyData.n.bitLength();
+        }
+        if (keyType === 'rsa' && modulusLength < 1024) {
+            throw new CustomError('RSA key too short', 'ESHORTKEY', rr);
+        }
+        return {
+            publicKey: publicKeyPem,
+            rr,
+            modulusLength,
+        };
+    }
+    throw new CustomError('Missing key value', 'EINVALIDVAL', rr);
+};
+exports.getPublicKey = getPublicKey;
+const escapePropValue = (value) => {
+    value = (value || '')
+        .toString()
+        .replace(/[\x00-\x1F]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!/[\s\x00-\x1F\x7F-\uFFFF()<>,;:\\"/[\]?=]/.test(value)) {
+        // return token value
+        return value;
+    }
+    // return quoted string with escaped quotes
+    return `"${value.replace(/["\\]/g, (c) => `\\${c}`)}"`;
+};
+exports.escapePropValue = escapePropValue;
+const escapeCommentValue = (value) => {
+    value = (value || '')
+        .toString()
+        .replace(/[\x00-\x1F]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return `${value.replace(/[\\)]/g, (c) => `\\${c}`)}`;
+};
+exports.escapeCommentValue = escapeCommentValue;
+const formatAuthHeaderRow = (method, status) => {
+    status = status || {};
+    let parts = [];
+    parts.push(`${method}=${status.result || 'none'}`);
+    if (status.comment) {
+        parts.push(`(${(0, exports.escapeCommentValue)(status.comment)})`);
+    }
+    for (let ptype of ['policy', 'smtp', 'body', 'header']) {
+        if (!status[ptype] || typeof status[ptype] !== 'object') {
+            continue;
+        }
+        for (let prop of Object.keys(status[ptype])) {
+            if (status[ptype][prop]) {
+                parts.push(`${ptype}.${prop}=${(0, exports.escapePropValue)(status[ptype][prop])}`);
+            }
+        }
+    }
+    return parts.join(' ');
+};
+exports.formatAuthHeaderRow = formatAuthHeaderRow;
+const formatRelaxedLine = (line, suffix) => {
+    let result = line
+        ?.toString('binary')
+        // unfold
+        .replace(/\r?\n/g, '')
+        // key to lowercase, trim around :
+        .replace(/^([^:]*):\s*/, (m, k) => k.toLowerCase().trim() + ':')
+        // single WSP
+        .replace(/\s+/g, ' ')
+        .trim() + (suffix ? suffix : '');
+    return Buffer.from(result, 'binary');
+};
+exports.formatRelaxedLine = formatRelaxedLine;
+const formatDomain = (domain) => {
+    domain = domain.toLowerCase().trim();
+    try {
+        domain = punycode_1.default.toASCII(domain).toLowerCase().trim();
+    }
+    catch (err) {
+        // ignore punycode errors
+    }
+    return domain;
+};
+exports.formatDomain = formatDomain;
+const getAlignment = (fromDomain, domainList, strict = false) => {
+    domainList = [].concat(domainList || []);
+    if (strict) {
+        fromDomain = (0, exports.formatDomain)(fromDomain);
+        for (let domain of domainList) {
+            domain = (0, exports.formatDomain)(psl_1.default.get(domain) || domain);
+            if ((0, exports.formatDomain)(domain) === fromDomain) {
+                return domain;
+            }
+        }
+    }
+    // match org domains
+    fromDomain = (0, exports.formatDomain)(psl_1.default.get(fromDomain) || fromDomain);
+    for (let domain of domainList) {
+        domain = (0, exports.formatDomain)(psl_1.default.get(domain) || domain);
+        if (domain === fromDomain) {
+            return domain;
+        }
+    }
+    return false;
+};
+exports.getAlignment = getAlignment;
+const validateAlgorithm = (algorithm, strict) => {
+    try {
+        if (!algorithm || !/^[^-]+-[^-]+$/.test(algorithm)) {
+            throw new Error('Invalid algorithm format');
+        }
+        let [signAlgo, hashAlgo] = algorithm.toLowerCase().split('-');
+        if (!['rsa', 'ed25519'].includes(signAlgo)) {
+            throw new Error('Unknown signing algorithm: ' + signAlgo);
+        }
+        if (!['sha256'].concat(!strict ? 'sha1' : []).includes(hashAlgo)) {
+            throw new Error('Unknown hashing algorithm: ' + hashAlgo);
+        }
+    }
+    catch (err) {
+        if (err !== null && typeof err === 'object' && Object.hasOwn(err, 'code')) {
+            err.code = 'EINVALIDALGO';
+        }
+        throw err;
+    }
+};
+exports.validateAlgorithm = validateAlgorithm;
+class CustomError extends Error {
+    constructor(message, code, rr) {
+        super(message);
+        this.code = code;
+        this.rr = rr ?? '';
+    }
+}
+exports.CustomError = CustomError;
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/fast-sha256.d.ts
+---
+
+export declare const digestLength: number;
+export declare const blockSize: number;
+export declare class Hash {
+    digestLength: number;
+    blockSize: number;
+    private state;
+    private temp;
+    private buffer;
+    private bufferLength;
+    private bytesHashed;
+    finished: boolean;
+    constructor();
+    reset(): this;
+    clean(): void;
+    update(data: Uint8Array, dataLength?: number): this;
+    finish(out: Uint8Array): this;
+    digest(): Uint8Array;
+    cacheState(): Uint8Array;
+    _saveState(out: Uint32Array): void;
+    _restoreState(from: Uint32Array, bytesHashed: number): void;
+}
+export declare class HMAC {
+    private inner;
+    private outer;
+    blockSize: number;
+    digestLength: number;
+    private istate;
+    private ostate;
+    constructor(key: Uint8Array);
+    reset(): this;
+    clean(): void;
+    update(data: Uint8Array): this;
+    finish(out: Uint8Array): this;
+    digest(): Uint8Array;
+}
+export declare function hash(data: Uint8Array): Uint8Array;
+export default hash;
+export declare function hmac(key: Uint8Array, data: Uint8Array): Uint8Array;
+export declare function hkdf(key: Uint8Array, salt?: Uint8Array, info?: Uint8Array, length?: number): Uint8Array;
+export declare function pbkdf2(password: Uint8Array, salt: Uint8Array, iterations: number, dkLen: number): Uint8Array;
+
+
+
+---
+File: /@zk-email/helpers/dist/lib/fast-sha256.js
+---
+
+"use strict";
+// This is modified version of https://github.com/dchest/fast-sha256-js/blob/master/src/sha256.ts
+// One modification is adding `cacheState` to Hash class (for partial SHA)
+// TODO: Fork the repo and make the changes; consider upstream to original repo
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.HMAC = exports.Hash = exports.blockSize = exports.digestLength = void 0;
+exports.hash = hash;
+exports.hmac = hmac;
+exports.hkdf = hkdf;
+exports.pbkdf2 = pbkdf2;
+// SHA-256 (+ HMAC and PBKDF2) for JavaScript.
+//
+// Written in 2014-2016 by Dmitry Chestnykh.
+// Public domain, no warranty.
+//
+// Functions (accept and return Uint8Arrays):
+//
+//   sha256(message) -> hash
+//   sha256.hmac(key, message) -> mac
+//   sha256.pbkdf2(password, salt, rounds, dkLen) -> dk
+//
+//  Classes:
+//
+//   new sha256.Hash()
+//   new sha256.HMAC(key)
+//
+exports.digestLength = 32;
+exports.blockSize = 64;
+// SHA-256 constants
+const K = new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98,
+    0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8,
+    0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819,
+    0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+    0xc67178f2,
+]);
+function hashBlocks(w, v, p, pos, len) {
+    let a, b, c, d, e, f, g, h, u, i, j, t1, t2;
+    while (len >= 64) {
+        a = v[0];
+        b = v[1];
+        c = v[2];
+        d = v[3];
+        e = v[4];
+        f = v[5];
+        g = v[6];
+        h = v[7];
+        for (i = 0; i < 16; i++) {
+            j = pos + i * 4;
+            w[i] = ((p[j] & 0xff) << 24) | ((p[j + 1] & 0xff) << 16) | ((p[j + 2] & 0xff) << 8) | (p[j + 3] & 0xff);
+        }
+        for (i = 16; i < 64; i++) {
+            u = w[i - 2];
+            t1 = ((u >>> 17) | (u << (32 - 17))) ^ ((u >>> 19) | (u << (32 - 19))) ^ (u >>> 10);
+            u = w[i - 15];
+            t2 = ((u >>> 7) | (u << (32 - 7))) ^ ((u >>> 18) | (u << (32 - 18))) ^ (u >>> 3);
+            w[i] = ((t1 + w[i - 7]) | 0) + ((t2 + w[i - 16]) | 0);
+        }
+        for (i = 0; i < 64; i++) {
+            t1 =
+                ((((((e >>> 6) | (e << (32 - 6))) ^ ((e >>> 11) | (e << (32 - 11))) ^ ((e >>> 25) | (e << (32 - 25)))) +
+                    ((e & f) ^ (~e & g))) |
+                    0) +
+                    ((h + ((K[i] + w[i]) | 0)) | 0)) |
+                    0;
+            t2 =
+                ((((a >>> 2) | (a << (32 - 2))) ^ ((a >>> 13) | (a << (32 - 13))) ^ ((a >>> 22) | (a << (32 - 22)))) +
+                    ((a & b) ^ (a & c) ^ (b & c))) |
+                    0;
+            h = g;
+            g = f;
+            f = e;
+            e = (d + t1) | 0;
+            d = c;
+            c = b;
+            b = a;
+            a = (t1 + t2) | 0;
+        }
+        v[0] += a;
+        v[1] += b;
+        v[2] += c;
+        v[3] += d;
+        v[4] += e;
+        v[5] += f;
+        v[6] += g;
+        v[7] += h;
+        pos += 64;
+        len -= 64;
+    }
+    return pos;
+}
+// Hash implements SHA256 hash algorithm.
+class Hash {
+    constructor() {
+        this.digestLength = exports.digestLength;
+        this.blockSize = exports.blockSize;
+        // Note: Int32Array is used instead of Uint32Array for performance reasons.
+        this.state = new Int32Array(8); // hash state
+        this.temp = new Int32Array(64); // temporary state
+        this.buffer = new Uint8Array(128); // buffer for data to hash
+        this.bufferLength = 0; // number of bytes in buffer
+        this.bytesHashed = 0; // number of total bytes hashed
+        this.finished = false; // indicates whether the hash was finalized
+        this.reset();
+    }
+    // Resets hash state making it possible
+    // to re-use this instance to hash other data.
+    reset() {
+        this.state[0] = 0x6a09e667;
+        this.state[1] = 0xbb67ae85;
+        this.state[2] = 0x3c6ef372;
+        this.state[3] = 0xa54ff53a;
+        this.state[4] = 0x510e527f;
+        this.state[5] = 0x9b05688c;
+        this.state[6] = 0x1f83d9ab;
+        this.state[7] = 0x5be0cd19;
+        this.bufferLength = 0;
+        this.bytesHashed = 0;
+        this.finished = false;
+        return this;
+    }
+    // Cleans internal buffers and re-initializes hash state.
+    clean() {
+        for (let i = 0; i < this.buffer.length; i++) {
+            this.buffer[i] = 0;
+        }
+        for (let i = 0; i < this.temp.length; i++) {
+            this.temp[i] = 0;
+        }
+        this.reset();
+    }
+    // Updates hash state with the given data.
+    //
+    // Optionally, length of the data can be specified to hash
+    // fewer bytes than data.length.
+    //
+    // Throws error when trying to update already finalized hash:
+    // instance must be reset to use it again.
+    update(data, dataLength = data.length) {
+        if (this.finished) {
+            throw new Error("SHA256: can't update because hash was finished.");
+        }
+        let dataPos = 0;
+        this.bytesHashed += dataLength;
+        if (this.bufferLength > 0) {
+            while (this.bufferLength < 64 && dataLength > 0) {
+                this.buffer[this.bufferLength++] = data[dataPos++];
+                dataLength--;
+            }
+            if (this.bufferLength === 64) {
+                hashBlocks(this.temp, this.state, this.buffer, 0, 64);
+                this.bufferLength = 0;
+            }
+        }
+        if (dataLength >= 64) {
+            dataPos = hashBlocks(this.temp, this.state, data, dataPos, dataLength);
+            dataLength %= 64;
+        }
+        while (dataLength > 0) {
+            this.buffer[this.bufferLength++] = data[dataPos++];
+            dataLength--;
+        }
+        return this;
+    }
+    // Finalizes hash state and puts hash into out.
+    //
+    // If hash was already finalized, puts the same value.
+    finish(out) {
+        if (!this.finished) {
+            const bytesHashed = this.bytesHashed;
+            const left = this.bufferLength;
+            const bitLenHi = (bytesHashed / 0x20000000) | 0;
+            const bitLenLo = bytesHashed << 3;
+            const padLength = bytesHashed % 64 < 56 ? 64 : 128;
+            this.buffer[left] = 0x80;
+            for (let i = left + 1; i < padLength - 8; i++) {
+                this.buffer[i] = 0;
+            }
+            this.buffer[padLength - 8] = (bitLenHi >>> 24) & 0xff;
+            this.buffer[padLength - 7] = (bitLenHi >>> 16) & 0xff;
+            this.buffer[padLength - 6] = (bitLenHi >>> 8) & 0xff;
+            this.buffer[padLength - 5] = (bitLenHi >>> 0) & 0xff;
+            this.buffer[padLength - 4] = (bitLenLo >>> 24) & 0xff;
+            this.buffer[padLength - 3] = (bitLenLo >>> 16) & 0xff;
+            this.buffer[padLength - 2] = (bitLenLo >>> 8) & 0xff;
+            this.buffer[padLength - 1] = (bitLenLo >>> 0) & 0xff;
+            hashBlocks(this.temp, this.state, this.buffer, 0, padLength);
+            this.finished = true;
+        }
+        for (let i = 0; i < 8; i++) {
+            out[i * 4 + 0] = (this.state[i] >>> 24) & 0xff;
+            out[i * 4 + 1] = (this.state[i] >>> 16) & 0xff;
+            out[i * 4 + 2] = (this.state[i] >>> 8) & 0xff;
+            out[i * 4 + 3] = (this.state[i] >>> 0) & 0xff;
+        }
+        return this;
+    }
+    // Returns the final hash digest.
+    digest() {
+        const out = new Uint8Array(this.digestLength);
+        this.finish(out);
+        return out;
+    }
+    // Returns the current hash state.
+    cacheState() {
+        const out32 = new Uint32Array(this.state.length);
+        this._saveState(out32);
+        const out = new Uint8Array(this.state.length * 4);
+        for (let i = 0; i < 8; i++) {
+            out[i * 4 + 0] = (this.state[i] >>> 24) & 0xff;
+            out[i * 4 + 1] = (this.state[i] >>> 16) & 0xff;
+            out[i * 4 + 2] = (this.state[i] >>> 8) & 0xff;
+            out[i * 4 + 3] = (this.state[i] >>> 0) & 0xff;
+        }
+        return out;
+    }
+    // Internal function for use in HMAC for optimization.
+    _saveState(out) {
+        for (let i = 0; i < this.state.length; i++) {
+            out[i] = this.state[i];
+        }
+    }
+    // Internal function for use in HMAC for optimization.
+    _restoreState(from, bytesHashed) {
+        for (let i = 0; i < this.state.length; i++) {
+            this.state[i] = from[i];
+        }
+        this.bytesHashed = bytesHashed;
+        this.finished = false;
+        this.bufferLength = 0;
+    }
+}
+exports.Hash = Hash;
+// HMAC implements HMAC-SHA256 message authentication algorithm.
+class HMAC {
+    constructor(key) {
+        this.inner = new Hash();
+        this.outer = new Hash();
+        this.blockSize = this.inner.blockSize;
+        this.digestLength = this.inner.digestLength;
+        const pad = new Uint8Array(this.blockSize);
+        if (key.length > this.blockSize) {
+            new Hash().update(key).finish(pad).clean();
+        }
+        else {
+            for (let i = 0; i < key.length; i++) {
+                pad[i] = key[i];
+            }
+        }
+        for (let i = 0; i < pad.length; i++) {
+            pad[i] ^= 0x36;
+        }
+        this.inner.update(pad);
+        for (let i = 0; i < pad.length; i++) {
+            pad[i] ^= 0x36 ^ 0x5c;
+        }
+        this.outer.update(pad);
+        this.istate = new Uint32Array(8);
+        this.ostate = new Uint32Array(8);
+        this.inner._saveState(this.istate);
+        this.outer._saveState(this.ostate);
+        for (let i = 0; i < pad.length; i++) {
+            pad[i] = 0;
+        }
+    }
+    // Returns HMAC state to the state initialized with key
+    // to make it possible to run HMAC over the other data with the same
+    // key without creating a new instance.
+    reset() {
+        this.inner._restoreState(this.istate, this.inner.blockSize);
+        this.outer._restoreState(this.ostate, this.outer.blockSize);
+        return this;
+    }
+    // Cleans HMAC state.
+    clean() {
+        for (let i = 0; i < this.istate.length; i++) {
+            this.ostate[i] = this.istate[i] = 0;
+        }
+        this.inner.clean();
+        this.outer.clean();
+    }
+    // Updates state with provided data.
+    update(data) {
+        this.inner.update(data);
+        return this;
+    }
+    // Finalizes HMAC and puts the result in out.
+    finish(out) {
+        if (this.outer.finished) {
+            this.outer.finish(out);
+        }
+        else {
+            this.inner.finish(out);
+            this.outer.update(out, this.digestLength).finish(out);
+        }
+        return this;
+    }
+    // Returns message authentication code.
+    digest() {
+        const out = new Uint8Array(this.digestLength);
+        this.finish(out);
+        return out;
+    }
+}
+exports.HMAC = HMAC;
+// Returns SHA256 hash of data.
+function hash(data) {
+    const h = new Hash().update(data);
+    const digest = h.digest();
+    h.clean();
+    return digest;
+}
+// Function hash is both available as module.hash and as default export.
+exports.default = hash;
+// Returns HMAC-SHA256 of data under the key.
+function hmac(key, data) {
+    const h = new HMAC(key).update(data);
+    const digest = h.digest();
+    h.clean();
+    return digest;
+}
+// Fills hkdf buffer like this:
+// T(1) = HMAC-Hash(PRK, T(0) | info | 0x01)
+function fillBuffer(buffer, hmac, info, counter) {
+    // Counter is a byte value: check if it overflowed.
+    const num = counter[0];
+    if (num === 0) {
+        throw new Error('hkdf: cannot expand more');
+    }
+    // Prepare HMAC instance for new data with old key.
+    hmac.reset();
+    // Hash in previous output if it was generated
+    // (i.e. counter is greater than 1).
+    if (num > 1) {
+        hmac.update(buffer);
+    }
+    // Hash in info if it exists.
+    if (info) {
+        hmac.update(info);
+    }
+    // Hash in the counter.
+    hmac.update(counter);
+    // Output result to buffer and clean HMAC instance.
+    hmac.finish(buffer);
+    // Increment counter inside typed array, this works properly.
+    counter[0]++;
+}
+const hkdfSalt = new Uint8Array(exports.digestLength); // Filled with zeroes.
+function hkdf(key, salt = hkdfSalt, info, length = 32) {
+    const counter = new Uint8Array([1]);
+    // HKDF-Extract uses salt as HMAC key, and key as data.
+    const okm = hmac(salt, key);
+    // Initialize HMAC for expanding with extracted key.
+    // Ensure no collisions with `hmac` function.
+    const hmac_ = new HMAC(okm);
+    // Allocate buffer.
+    const buffer = new Uint8Array(hmac_.digestLength);
+    let bufpos = buffer.length;
+    const out = new Uint8Array(length);
+    for (let i = 0; i < length; i++) {
+        if (bufpos === buffer.length) {
+            fillBuffer(buffer, hmac_, info, counter);
+            bufpos = 0;
+        }
+        out[i] = buffer[bufpos++];
+    }
+    hmac_.clean();
+    buffer.fill(0);
+    counter.fill(0);
+    return out;
+}
+// Derives a key from password and salt using PBKDF2-HMAC-SHA256
+// with the given number of iterations.
+//
+// The number of bytes returned is equal to dkLen.
+//
+// (For better security, avoid dkLen greater than hash length - 32 bytes).
+function pbkdf2(password, salt, iterations, dkLen) {
+    const prf = new HMAC(password);
+    const len = prf.digestLength;
+    const ctr = new Uint8Array(4);
+    const t = new Uint8Array(len);
+    const u = new Uint8Array(len);
+    const dk = new Uint8Array(dkLen);
+    for (let i = 0; i * len < dkLen; i++) {
+        let c = i + 1;
+        ctr[0] = (c >>> 24) & 0xff;
+        ctr[1] = (c >>> 16) & 0xff;
+        ctr[2] = (c >>> 8) & 0xff;
+        ctr[3] = (c >>> 0) & 0xff;
+        prf.reset();
+        prf.update(salt);
+        prf.update(ctr);
+        prf.finish(u);
+        for (let j = 0; j < len; j++) {
+            t[j] = u[j];
+        }
+        for (let j = 2; j <= iterations; j++) {
+            prf.reset();
+            prf.update(u).finish(u);
+            for (let k = 0; k < len; k++) {
+                t[k] ^= u[k];
+            }
+        }
+        for (let j = 0; j < len && i * len + j < dkLen; j++) {
+            dk[i * len + j] = t[j];
+        }
+    }
+    for (let i = 0; i < len; i++) {
+        t[i] = u[i] = 0;
+    }
+    for (let i = 0; i < 4; i++) {
+        ctr[i] = 0;
+    }
+    prf.clean();
+    return dk;
+}
+
+
+
+---
+File: /@zk-email/helpers/dist/binary-format.d.ts
+---
+
+export declare function bytesToString(bytes: Uint8Array): string;
+export declare function stringToBytes(str: string): Uint8Array;
+export declare function bufferToUint8Array(buf: Buffer): Uint8Array;
+export declare function bufferToHex(buf: Buffer): String;
+export declare function Uint8ArrayToCharArray(a: Uint8Array): string[];
+export declare function Uint8ArrayToString(a: Uint8Array): Promise<string>;
+export declare function Uint8ArrayToHex(a: Uint8Array): Promise<string>;
+export declare function bufferToString(buf: Buffer): String;
+export declare function bytesToBigInt(bytes: Uint8Array): bigint;
+export declare function bigIntToChunkedBytes(num: BigInt | bigint, bytesPerChunk: number, numChunks: number): string[];
+export declare function toCircomBigIntBytes(num: BigInt | bigint): string[];
+export declare function toHex(bytes: Uint8Array): string;
+export declare function fromHex(hexString: string): Uint8Array;
+export declare function int64toBytes(num: number): Uint8Array;
+export declare function int8toBytes(num: number): Uint8Array;
+export declare function bitsToUint8(bits: string[]): Uint8Array;
+export declare function uint8ToBits(uint8: Uint8Array): string;
+export declare function mergeUInt8Arrays(a1: Uint8Array, a2: Uint8Array): Uint8Array;
+export declare function assert(cond: boolean, errorMessage: string): void;
+export declare function packedNBytesToString(packedBytes: bigint[], n?: number): string;
+export declare function packBytesIntoNBytes(messagePaddedRaw: Uint8Array | string, n?: number): Array<bigint>;
+
+
+
+---
+File: /@zk-email/helpers/dist/binary-format.js
+---
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.bytesToString = bytesToString;
+exports.stringToBytes = stringToBytes;
+exports.bufferToUint8Array = bufferToUint8Array;
+exports.bufferToHex = bufferToHex;
+exports.Uint8ArrayToCharArray = Uint8ArrayToCharArray;
+exports.Uint8ArrayToString = Uint8ArrayToString;
+exports.Uint8ArrayToHex = Uint8ArrayToHex;
+exports.bufferToString = bufferToString;
+exports.bytesToBigInt = bytesToBigInt;
+exports.bigIntToChunkedBytes = bigIntToChunkedBytes;
+exports.toCircomBigIntBytes = toCircomBigIntBytes;
+exports.toHex = toHex;
+exports.fromHex = fromHex;
+exports.int64toBytes = int64toBytes;
+exports.int8toBytes = int8toBytes;
+exports.bitsToUint8 = bitsToUint8;
+exports.uint8ToBits = uint8ToBits;
+exports.mergeUInt8Arrays = mergeUInt8Arrays;
+exports.assert = assert;
+exports.packedNBytesToString = packedNBytesToString;
+exports.packBytesIntoNBytes = packBytesIntoNBytes;
+const constants_1 = require("./constants");
+function bytesToString(bytes) {
+    return new TextDecoder().decode(bytes);
+}
+// stringToUint8Array
+function stringToBytes(str) {
+    // const encodedText = new TextEncoder().encode(str);
+    const toReturn = Uint8Array.from(str, (x) => x.charCodeAt(0));
+    //   const buf = Buffer.from(str, "utf8");
+    return toReturn;
+    // TODO: Check encoding mismatch if the proof doesnt work
+    // Note that our custom encoding function maps (239, 191, 189) -> (253)
+    // Note that our custom encoding function maps (207, 181) -> (245)
+    // throw Error(
+    //   "TextEncoder does not match string2bytes function" +
+    //     "\n" +
+    //     str +
+    //     "\n" +
+    //     buf +
+    //     "\n" +
+    //     Uint8Array.from(buf) +
+    //     "\n" +
+    //     JSON.stringify(encodedText) +
+    //     "\n" +
+    //     JSON.stringify(toReturn)
+    // );
+}
+function bufferToUint8Array(buf) {
+    const ab = new ArrayBuffer(buf.length);
+    const view = new Uint8Array(ab);
+    for (let i = 0; i < buf.length; ++i) {
+        view[i] = buf[i];
+    }
+    return Uint8Array.from(view);
+}
+function bufferToHex(buf) {
+    return buf.toString('hex');
+}
+function Uint8ArrayToCharArray(a) {
+    return Array.from(a).map((x) => x.toString());
+}
+async function Uint8ArrayToString(a) {
+    return Array.from(a)
+        .map((x) => x.toString())
+        .join(';');
+}
+async function Uint8ArrayToHex(a) {
+    return Buffer.from(a).toString('hex');
+}
+function bufferToString(buf) {
+    const intermediate = bufferToUint8Array(buf);
+    return bytesToString(intermediate);
+}
+function bytesToBigInt(bytes) {
+    let res = 0n;
+    for (let i = 0; i < bytes.length; ++i) {
+        res = (res << 8n) + BigInt(bytes[i]);
+    }
+    return res;
+}
+function bigIntToChunkedBytes(num, bytesPerChunk, numChunks) {
+    const res = [];
+    const bigintNum = typeof num === 'bigint' ? num : num.valueOf();
+    const msk = (1n << BigInt(bytesPerChunk)) - 1n;
+    for (let i = 0; i < numChunks; ++i) {
+        res.push(((bigintNum >> BigInt(i * bytesPerChunk)) & msk).toString());
+    }
+    return res;
+}
+function toCircomBigIntBytes(num) {
+    return bigIntToChunkedBytes(num, constants_1.CIRCOM_BIGINT_N, constants_1.CIRCOM_BIGINT_K);
+}
+// https://stackoverflow.com/a/69585881
+const HEX_STRINGS = '0123456789abcdef';
+const MAP_HEX = {
+    0: 0,
+    1: 1,
+    2: 2,
+    3: 3,
+    4: 4,
+    5: 5,
+    6: 6,
+    7: 7,
+    8: 8,
+    9: 9,
+    a: 10,
+    b: 11,
+    c: 12,
+    d: 13,
+    e: 14,
+    f: 15,
+    A: 10,
+    B: 11,
+    C: 12,
+    D: 13,
+    E: 14,
+    F: 15,
+};
+// Fast Uint8Array to hex
+function toHex(bytes) {
+    return Array.from(bytes || [])
+        .map((b) => HEX_STRINGS[b >> 4] + HEX_STRINGS[b & 15])
+        .join('');
+}
+// Mimics Buffer.from(x, 'hex') logic
+// Stops on first non-hex string and returns
+// https://github.com/nodejs/node/blob/v14.18.1/src/string_bytes.cc#L246-L261
+function fromHex(hexString) {
+    let hexStringTrimmed = hexString;
+    if (hexString[0] === '0' && hexString[1] === 'x') {
+        hexStringTrimmed = hexString.slice(2);
+    }
+    const bytes = new Uint8Array(Math.floor((hexStringTrimmed || '').length / 2));
+    let i;
+    for (i = 0; i < bytes.length; i++) {
+        const a = MAP_HEX[hexStringTrimmed[i * 2]];
+        const b = MAP_HEX[hexStringTrimmed[i * 2 + 1]];
+        if (a === undefined || b === undefined) {
+            break;
+        }
+        bytes[i] = (a << 4) | b;
+    }
+    return i === bytes.length ? bytes : bytes.slice(0, i);
+}
+// Works only on 32 bit sha text lengths
+function int64toBytes(num) {
+    const arr = new ArrayBuffer(8); // an Int32 takes 4 bytes
+    const view = new DataView(arr);
+    view.setInt32(4, num, false); // byteOffset = 0; litteEndian = false
+    return new Uint8Array(arr);
+}
+// Works only on 32 bit sha text lengths
+function int8toBytes(num) {
+    const arr = new ArrayBuffer(1); // an Int8 takes 4 bytes
+    const view = new DataView(arr);
+    view.setUint8(0, num); // byteOffset = 0; litteEndian = false
+    return new Uint8Array(arr);
+}
+function bitsToUint8(bits) {
+    const bytes = new Uint8Array(bits.length);
+    for (let i = 0; i < bits.length; i += 1) {
+        bytes[i] = parseInt(bits[i], 2);
+    }
+    return bytes;
+}
+function uint8ToBits(uint8) {
+    return uint8.reduce((acc, byte) => acc + byte.toString(2).padStart(8, '0'), '');
+}
+function mergeUInt8Arrays(a1, a2) {
+    // sum of individual array lengths
+    const mergedArray = new Uint8Array(a1.length + a2.length);
+    mergedArray.set(a1);
+    mergedArray.set(a2, a1.length);
+    return mergedArray;
+}
+function assert(cond, errorMessage) {
+    if (!cond) {
+        throw new Error(errorMessage);
+    }
+}
+function packedNBytesToString(packedBytes, n = 31) {
+    const chars = [];
+    for (let i = 0; i < packedBytes.length; i++) {
+        for (let k = 0n; k < n; k++) {
+            chars.push(Number((packedBytes[i] >> (k * 8n)) % 256n));
+        }
+    }
+    return bytesToString(Uint8Array.from(chars));
+}
+function packBytesIntoNBytes(messagePaddedRaw, n = 7) {
+    const messagePadded = typeof messagePaddedRaw === 'string' ? stringToBytes(messagePaddedRaw) : messagePaddedRaw;
+    const output = [];
+    for (let i = 0; i < messagePadded.length; i++) {
+        if (i % n === 0) {
+            output.push(0n);
+        }
+        const j = (i / n) | 0;
+        console.assert(j === output.length - 1, 'Not editing the index of the last element -- packing loop invariants bug!');
+        output[j] += BigInt(messagePadded[i]) << BigInt((i % n) * 8);
+    }
+    return output;
+}
+// Usage: let in_padded_n_bytes = packBytesIntoNBytes(messagePadded, 7).map((x) => x.toString()); // Packed into 7 byte signals
+// console.log(packedNBytesToString([30680772461461504n, 129074054722665n, 30794022159122432n, 30803244232763745n]));
+
+
+
+---
+File: /@zk-email/helpers/dist/chunked-zkey.d.ts
+---
+
+export declare const uncompressGz: (arrayBuffer: ArrayBuffer) => Promise<ArrayBuffer>;
+export declare function downloadFromFilename(baseUrl: string, filename: string, compressed?: boolean): Promise<void>;
+export declare function downloadProofFiles(baseUrl: string, circuitName: string, onFileDownloaded: () => void): Promise<void>;
+export declare function generateProof(input: any, baseUrl: string, circuitName: string): Promise<{
+    proof: any;
+    publicSignals: any;
+}>;
+export declare function verifyProof(proof: any, publicSignals: any, baseUrl: string, circuitName: string): Promise<any>;
+export declare function buildInput(pubkey: string, msghash: string, sig: string): {
+    r: string[];
+    s: string[];
+    msghash: bigint[];
+    pubkey: string[][];
+};
+
+
+
+---
+File: /@zk-email/helpers/dist/chunked-zkey.js
+---
+
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.uncompressGz = void 0;
+exports.downloadFromFilename = downloadFromFilename;
+exports.downloadProofFiles = downloadProofFiles;
+exports.generateProof = generateProof;
+exports.verifyProof = verifyProof;
+exports.buildInput = buildInput;
+const localforage_1 = __importDefault(require("localforage"));
+// @ts-ignore
+const pako_1 = __importDefault(require("pako"));
+// @ts-ignore
+const snarkjs = __importStar(require("snarkjs"));
+const zkeyExtension = '.gz';
+const zkeyExtensionRegEx = new RegExp(`\\b${zkeyExtension}$\\b`, 'i'); // = /.gz$/i
+const zkeySuffix = ['b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k'];
+// uncompresses single .gz file.
+// returns the contents as an ArrayBuffer
+const uncompressGz = async (arrayBuffer) => {
+    const output = pako_1.default.ungzip(arrayBuffer);
+    const buff = output.buffer;
+    return buff;
+};
+exports.uncompressGz = uncompressGz;
+// We can use this function to ensure the type stored in localforage is correct.
+async function storeArrayBuffer(keyname, buffer) {
+    return localforage_1.default.setItem(keyname, buffer);
+}
+async function downloadWithRetries(link, downloadAttempts) {
+    for (let i = 1; i <= downloadAttempts; i++) {
+        console.log(`download attempt ${i} for ${link}`);
+        const response = await fetch(link, { method: 'GET' });
+        if (response.status === 200) {
+            return response;
+        }
+    }
+    throw new Error(`Error downloading ${link} after ${downloadAttempts} retries`);
+}
+// GET the compressed file from the remote server, then store it with localforage
+// Note that it must be stored as an uncompressed ArrayBuffer
+// and named such that filename===`${name}.zkey${a}` in order for it to be found by snarkjs.
+async function downloadFromFilename(baseUrl, filename, compressed = false) {
+    const link = baseUrl + filename;
+    const zkeyResp = await downloadWithRetries(link, 3);
+    const zkeyBuff = await zkeyResp.arrayBuffer();
+    if (!compressed) {
+        await storeArrayBuffer(filename, zkeyBuff);
+    }
+    else {
+        // uncompress the data
+        const zkeyUncompressed = await (0, exports.uncompressGz)(zkeyBuff);
+        const rawFilename = filename.replace(zkeyExtensionRegEx, ''); // replace .gz with ""
+        // store the uncompressed data
+        console.log('storing file in localforage', rawFilename);
+        await storeArrayBuffer(rawFilename, zkeyUncompressed);
+        console.log('stored file in localforage', rawFilename);
+        // await localforage.setItem(filename, zkeyBuff);
+    }
+    console.log(`Storage of ${filename} successful!`);
+}
+async function downloadProofFiles(baseUrl, circuitName, onFileDownloaded) {
+    const filePromises = [];
+    for (const c of zkeySuffix) {
+        const targzFilename = `${circuitName}.zkey${c}${zkeyExtension}`;
+        // const itemCompressed = await localforage.getItem(targzFilename);
+        const item = await localforage_1.default.getItem(`${circuitName}.zkey${c}`);
+        if (item) {
+            console.log(`${circuitName}.zkey${c}${item ? '' : zkeyExtension} already found in localforage!`);
+            onFileDownloaded();
+            continue;
+        }
+        filePromises.push(downloadFromFilename(baseUrl, targzFilename, true).then(() => onFileDownloaded()));
+    }
+    console.log(filePromises);
+    await Promise.all(filePromises);
+}
+async function generateProof(input, baseUrl, circuitName) {
+    // TODO: figure out how to generate this s.t. it passes build
+    console.log('generating proof for input');
+    console.log(input);
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, `${baseUrl}${circuitName}.wasm`, `${circuitName}.zkey`);
+    console.log(`Generated proof ${JSON.stringify(proof)}`);
+    return {
+        proof,
+        publicSignals,
+    };
+}
+async function verifyProof(proof, publicSignals, baseUrl, circuitName) {
+    console.log('PROOF', proof);
+    console.log('PUBLIC SIGNALS', publicSignals);
+    const response = await downloadWithRetries(`${baseUrl}${circuitName}.vkey.json`, 3);
+    const vkey = await response.json();
+    console.log('vkey', vkey);
+    const proofVerified = await snarkjs.groth16.verify(vkey, publicSignals, proof);
+    console.log('proofV', proofVerified);
+    return proofVerified;
+}
+function bigIntToArray(n, k, x) {
+    let divisor = 1n;
+    for (let idx = 0; idx < n; idx++) {
+        divisor *= 2n;
+    }
+    const ret = [];
+    let temp = BigInt(x);
+    for (let idx = 0; idx < k; idx++) {
+        ret.push(temp % divisor);
+        temp /= divisor;
+    }
+    return ret;
+}
+// taken from generation code in dizkus-circuits tests
+function pubkeyToXYArrays(pk) {
+    const XArr = bigIntToArray(64, 4, BigInt(`0x${pk.slice(4, 4 + 64)}`)).map((el) => el.toString());
+    const YArr = bigIntToArray(64, 4, BigInt(`0x${pk.slice(68, 68 + 64)}`)).map((el) => el.toString());
+    return [XArr, YArr];
+}
+// taken from generation code in dizkus-circuits tests
+function sigToRSArrays(sig) {
+    const rArr = bigIntToArray(64, 4, BigInt(`0x${sig.slice(2, 2 + 64)}`)).map((el) => el.toString());
+    const sArr = bigIntToArray(64, 4, BigInt(`0x${sig.slice(66, 66 + 64)}`)).map((el) => el.toString());
+    return [rArr, sArr];
+}
+function buildInput(pubkey, msghash, sig) {
+    const [r, s] = sigToRSArrays(sig);
+    return {
+        r,
+        s,
+        msghash: bigIntToArray(64, 4, BigInt(msghash)),
+        pubkey: pubkeyToXYArrays(pubkey),
+    };
+}
+
+
+
+---
+File: /@zk-email/helpers/dist/constants.d.ts
+---
+
+export declare const CIRCOM_FIELD_MODULUS = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+export declare const MAX_HEADER_PADDED_BYTES = 1024;
+export declare const MAX_BODY_PADDED_BYTES = 1536;
+export declare const CIRCOM_BIGINT_N = 121;
+export declare const CIRCOM_BIGINT_K = 17;
+export declare const CIRCOM_LEVELS = 30;
+
+
+
+---
+File: /@zk-email/helpers/dist/constants.js
+---
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.CIRCOM_LEVELS = exports.CIRCOM_BIGINT_K = exports.CIRCOM_BIGINT_N = exports.MAX_BODY_PADDED_BYTES = exports.MAX_HEADER_PADDED_BYTES = exports.CIRCOM_FIELD_MODULUS = void 0;
+exports.CIRCOM_FIELD_MODULUS = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+exports.MAX_HEADER_PADDED_BYTES = 1024; // Default value for max size to be used in circuit
+exports.MAX_BODY_PADDED_BYTES = 1536; // Default value for max size to be used in circuit
+exports.CIRCOM_BIGINT_N = 121;
+exports.CIRCOM_BIGINT_K = 17;
+exports.CIRCOM_LEVELS = 30;
+
+
+
+---
+File: /@zk-email/helpers/dist/hash.d.ts
+---
+
+export declare function poseidonLarge(input: bigint, numChunks: number, bitsPerChunk: number): Promise<bigint>;
+
+
+
+---
+File: /@zk-email/helpers/dist/hash.js
+---
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.poseidonLarge = poseidonLarge;
+const circomlibjs_1 = require("circomlibjs");
+const binary_format_1 = require("./binary-format");
+async function poseidonLarge(input, numChunks, bitsPerChunk) {
+    const poseidon = await (0, circomlibjs_1.buildPoseidon)();
+    const pubkeyChunked = (0, binary_format_1.bigIntToChunkedBytes)(input, bitsPerChunk, numChunks);
+    const hash = poseidon(pubkeyChunked);
+    return poseidon.F.toObject(hash);
+}
+
+
+
+---
+File: /@zk-email/helpers/dist/index.d.ts
+---
+
+export * from './binary-format';
+export * from './constants';
+export * from './input-generators';
+export * from './sha-utils';
+
+
+
+---
+File: /@zk-email/helpers/dist/index.js
+---
+
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __exportStar = (this && this.__exportStar) || function(m, exports) {
+    for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+__exportStar(require("./binary-format"), exports);
+__exportStar(require("./constants"), exports);
+__exportStar(require("./input-generators"), exports);
+__exportStar(require("./sha-utils"), exports);
+
+
+
+---
+File: /@zk-email/helpers/dist/input-generators.d.ts
+---
+
+import { DKIMVerificationResult } from './dkim';
+type CircuitInput = {
+    emailHeader: string[];
+    emailHeaderLength: string;
+    pubkey: string[];
+    signature: string[];
+    emailBody?: string[];
+    emailBodyLength?: string;
+    precomputedSHA?: string[];
+    bodyHashIndex?: string;
+    decodedEmailBodyIn?: string[];
+    headerMask?: number[];
+    bodyMask?: number[];
+};
+type InputGenerationArgs = {
+    ignoreBodyHashCheck?: boolean;
+    enableHeaderMasking?: boolean;
+    enableBodyMasking?: boolean;
+    shaPrecomputeSelector?: string;
+    maxHeadersLength?: number;
+    maxBodyLength?: number;
+    removeSoftLineBreaks?: boolean;
+    headerMask?: number[];
+    bodyMask?: number[];
+};
+type DKIMVerificationArgs = {
+    domain?: string;
+    enableSanitization?: boolean;
+    fallbackToZKEmailDNSArchive?: boolean;
+};
+/**
+ *
+ * @description Generate circuit inputs for the EmailVerifier circuit from raw email content
+ * @param rawEmail Full email content as a buffer or string
+ * @param inputParams Arguments to control the input generation
+ * @param dkimVerificationArgs Arguments to control the DKIM verification
+ * @returns Circuit inputs for the EmailVerifier circuit
+ */
+export declare function generateEmailVerifierInputs(rawEmail: Buffer | string, inputParams?: InputGenerationArgs, dkimVerificationArgs?: DKIMVerificationArgs): Promise<CircuitInput>;
+/**
+ *
+ * @description Generate circuit inputs for the EmailVerifier circuit from DKIMVerification result
+ * @param dkimResult DKIMVerificationResult containing email data and verification result
+ * @param params Arguments to control the input generation
+ * @returns Circuit inputs for the EmailVerifier circuit
+ */
+export declare function generateEmailVerifierInputsFromDKIMResult(dkimResult: DKIMVerificationResult, params?: InputGenerationArgs): CircuitInput;
+export {};
+
+
+
+---
+File: /@zk-email/helpers/dist/input-generators.js
+---
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.generateEmailVerifierInputs = generateEmailVerifierInputs;
+exports.generateEmailVerifierInputsFromDKIMResult = generateEmailVerifierInputsFromDKIMResult;
+const binary_format_1 = require("./binary-format");
+const constants_1 = require("./constants");
+const dkim_1 = require("./dkim");
+const sha_utils_1 = require("./sha-utils");
+function removeSoftLineBreaks(body) {
+    const result = [];
+    let i = 0;
+    while (i < body.length) {
+        if (i + 2 < body.length &&
+            body[i] === '61' && // '=' character
+            body[i + 1] === '13' && // '\r' character
+            body[i + 2] === '10') {
+            // '\n' character
+            // Skip the soft line break sequence
+            i += 3; // Move past the soft line break
+        }
+        else {
+            result.push(body[i]);
+            i++;
+        }
+    }
+    // Pad the result with zeros to make it the same length as the body
+    while (result.length < body.length) {
+        result.push('0');
+    }
+    return result;
+}
+/**
+ *
+ * @description Generate circuit inputs for the EmailVerifier circuit from raw email content
+ * @param rawEmail Full email content as a buffer or string
+ * @param inputParams Arguments to control the input generation
+ * @param dkimVerificationArgs Arguments to control the DKIM verification
+ * @returns Circuit inputs for the EmailVerifier circuit
+ */
+async function generateEmailVerifierInputs(rawEmail, inputParams = {}, dkimVerificationArgs = {}) {
+    const dkimResult = await (0, dkim_1.verifyDKIMSignature)(rawEmail, dkimVerificationArgs.domain, dkimVerificationArgs.enableSanitization, dkimVerificationArgs.fallbackToZKEmailDNSArchive);
+    return generateEmailVerifierInputsFromDKIMResult(dkimResult, inputParams);
+}
+/**
+ *
+ * @description Generate circuit inputs for the EmailVerifier circuit from DKIMVerification result
+ * @param dkimResult DKIMVerificationResult containing email data and verification result
+ * @param params Arguments to control the input generation
+ * @returns Circuit inputs for the EmailVerifier circuit
+ */
+function generateEmailVerifierInputsFromDKIMResult(dkimResult, params = {}) {
+    const { headers, body, bodyHash, publicKey, signature } = dkimResult;
+    // SHA add padding
+    const [messagePadded, messagePaddedLen] = (0, sha_utils_1.sha256Pad)(headers, params.maxHeadersLength || constants_1.MAX_HEADER_PADDED_BYTES);
+    const circuitInputs = {
+        emailHeader: (0, binary_format_1.Uint8ArrayToCharArray)(messagePadded), // Packed into 1 byte signals
+        emailHeaderLength: messagePaddedLen.toString(),
+        pubkey: (0, binary_format_1.toCircomBigIntBytes)(publicKey),
+        signature: (0, binary_format_1.toCircomBigIntBytes)(signature),
+    };
+    if (params.enableHeaderMasking) {
+        circuitInputs.headerMask = params.headerMask;
+    }
+    if (!params.ignoreBodyHashCheck) {
+        if (!body || !bodyHash) {
+            throw new Error('body and bodyHash are required when ignoreBodyHashCheck is false');
+        }
+        const bodyHashIndex = headers.toString().indexOf(bodyHash);
+        const maxBodyLength = params.maxBodyLength || constants_1.MAX_BODY_PADDED_BYTES;
+        // 65 comes from the 64 at the end and the 1 bit in the start, then 63 comes from the formula to round it up to the nearest 64.
+        // see sha256algorithm.com for a more full explanation of padding length
+        const bodySHALength = Math.floor((body.length + 63 + 65) / 64) * 64;
+        const [bodyPadded, bodyPaddedLen] = (0, sha_utils_1.sha256Pad)(body, Math.max(maxBodyLength, bodySHALength));
+        const { precomputedSha, bodyRemaining, bodyRemainingLength } = (0, sha_utils_1.generatePartialSHA)({
+            body: bodyPadded,
+            bodyLength: bodyPaddedLen,
+            selectorString: params.shaPrecomputeSelector,
+            maxRemainingBodyLength: maxBodyLength,
+        });
+        circuitInputs.emailBodyLength = bodyRemainingLength.toString();
+        circuitInputs.precomputedSHA = (0, binary_format_1.Uint8ArrayToCharArray)(precomputedSha);
+        circuitInputs.bodyHashIndex = bodyHashIndex.toString();
+        circuitInputs.emailBody = (0, binary_format_1.Uint8ArrayToCharArray)(bodyRemaining);
+        if (params.removeSoftLineBreaks) {
+            circuitInputs.decodedEmailBodyIn = removeSoftLineBreaks(circuitInputs.emailBody);
+        }
+        if (params.enableBodyMasking) {
+            circuitInputs.bodyMask = params.bodyMask;
+        }
+    }
+    return circuitInputs;
+}
+
+
+
+---
+File: /@zk-email/helpers/dist/sha-utils.d.ts
+---
+
+export declare function findIndexInUint8Array(array: Uint8Array, selector: Uint8Array): number;
+export declare function padUint8ArrayWithZeros(array: Uint8Array, length: number): Uint8Array;
+export declare function generatePartialSHA({ body, bodyLength, selectorString, // String to split the body
+maxRemainingBodyLength, }: {
+    body: Uint8Array;
+    bodyLength: number;
+    selectorString?: string;
+    maxRemainingBodyLength: number;
+}): {
+    precomputedSha: Uint8Array;
+    bodyRemaining: Uint8Array;
+    bodyRemainingLength: number;
+};
+export declare function shaHash(str: Uint8Array): Buffer;
+export declare function partialSha(msg: Uint8Array, msgLen: number): Uint8Array;
+export declare function sha256Pad(message: Uint8Array, maxShaBytes: number): [Uint8Array, number];
+
+
+
+---
+File: /@zk-email/helpers/dist/sha-utils.js
+---
+
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.findIndexInUint8Array = findIndexInUint8Array;
+exports.padUint8ArrayWithZeros = padUint8ArrayWithZeros;
+exports.generatePartialSHA = generatePartialSHA;
+exports.shaHash = shaHash;
+exports.partialSha = partialSha;
+exports.sha256Pad = sha256Pad;
+const CryptoJS = __importStar(require("crypto"));
+const binary_format_1 = require("./binary-format");
+const fast_sha256_1 = require("./lib/fast-sha256");
+function findIndexInUint8Array(array, selector) {
+    let i = 0;
+    let j = 0;
+    while (i < array.length) {
+        if (array[i] === selector[j]) {
+            j++;
+            if (j === selector.length) {
+                return i - j + 1;
+            }
+        }
+        else {
+            j = 0;
+        }
+        i++;
+    }
+    return -1;
+}
+function padUint8ArrayWithZeros(array, length) {
+    while (array.length < length) {
+        // eslint-disable-next-line no-param-reassign
+        array = (0, binary_format_1.mergeUInt8Arrays)(array, (0, binary_format_1.int8toBytes)(0));
+    }
+    return array;
+}
+function generatePartialSHA({ body, bodyLength, selectorString, // String to split the body
+maxRemainingBodyLength, // Maximum allowed length of the body after the selector
+ }) {
+    let selectorIndex = 0;
+    if (selectorString) {
+        const selector = new TextEncoder().encode(selectorString);
+        selectorIndex = findIndexInUint8Array(body, selector);
+        if (selectorIndex === -1) {
+            throw new Error(`SHA precompute selector "${selectorString}" not found in the body`);
+        }
+    }
+    const shaCutoffIndex = Math.floor(selectorIndex / 64) * 64;
+    const precomputeText = body.slice(0, shaCutoffIndex);
+    let bodyRemaining = body.slice(shaCutoffIndex);
+    const bodyRemainingLength = bodyLength - precomputeText.length;
+    if (bodyRemainingLength > maxRemainingBodyLength) {
+        throw new Error(`Remaining body ${bodyRemainingLength} after the selector is longer than max (${maxRemainingBodyLength})`);
+    }
+    if (bodyRemaining.length % 64 !== 0) {
+        throw new Error('Remaining body was not padded correctly with int64s');
+    }
+    bodyRemaining = padUint8ArrayWithZeros(bodyRemaining, maxRemainingBodyLength);
+    const precomputedSha = partialSha(precomputeText, shaCutoffIndex);
+    return {
+        precomputedSha,
+        bodyRemaining,
+        bodyRemainingLength,
+    };
+}
+function shaHash(str) {
+    return CryptoJS.createHash('sha256').update(str).digest();
+}
+function partialSha(msg, msgLen) {
+    const shaGadget = new fast_sha256_1.Hash();
+    return shaGadget.update(msg, msgLen).cacheState();
+}
+// Puts an end selector, a bunch of 0s, then the length, then fill the rest with 0s.
+function sha256Pad(message, maxShaBytes) {
+    const msgLen = message.length * 8; // bytes to bits
+    const msgLenBytes = (0, binary_format_1.int64toBytes)(msgLen);
+    let res = (0, binary_format_1.mergeUInt8Arrays)(message, (0, binary_format_1.int8toBytes)(2 ** 7)); // Add the 1 on the end, length 505
+    // while ((prehash_prepad_m.length * 8 + length_in_bytes.length * 8) % 512 !== 0) {
+    while ((res.length * 8 + msgLenBytes.length * 8) % 512 !== 0) {
+        res = (0, binary_format_1.mergeUInt8Arrays)(res, (0, binary_format_1.int8toBytes)(0));
+    }
+    res = (0, binary_format_1.mergeUInt8Arrays)(res, msgLenBytes);
+    (0, binary_format_1.assert)((res.length * 8) % 512 === 0, 'Padding did not complete properly!');
+    const messageLen = res.length;
+    while (res.length < maxShaBytes) {
+        res = (0, binary_format_1.mergeUInt8Arrays)(res, (0, binary_format_1.int64toBytes)(0));
+    }
+    (0, binary_format_1.assert)(res.length === maxShaBytes, `Padding to max length did not complete properly! Your padded message is ${res.length} long but max is ${maxShaBytes}!`);
+    return [res, messageLen];
+}
+
+
+
+---
+File: /@zk-email/helpers/node_modules/@iden3/binfileutils/src/binfileutils.js
+---
+
+
+import  { Scalar, BigBuffer } from "ffjavascript";
+import * as fastFile from "fastfile";
+
+export async function readBinFile(fileName, type, maxVersion, cacheSize, pageSize) {
+
+    const fd = await fastFile.readExisting(fileName, cacheSize, pageSize);
+
+    const b = await fd.read(4);
+    let readedType = "";
+    for (let i=0; i<4; i++) readedType += String.fromCharCode(b[i]);
+
+    if (readedType != type) throw new Error(fileName + ": Invalid File format");
+
+    let v = await fd.readULE32();
+
+    if (v>maxVersion) throw new Error("Version not supported");
+
+    const nSections = await fd.readULE32();
+
+    // Scan sections
+    let sections = [];
+    for (let i=0; i<nSections; i++) {
+        let ht = await fd.readULE32();
+        let hl = await fd.readULE64();
+        if (typeof sections[ht] == "undefined") sections[ht] = [];
+        sections[ht].push({
+            p: fd.pos,
+            size: hl
+        });
+        fd.pos += hl;
+    }
+
+    return {fd, sections};
+}
+
+export async function createBinFile(fileName, type, version, nSections, cacheSize, pageSize) {
+
+    const fd = await fastFile.createOverride(fileName, cacheSize, pageSize);
+
+    const buff = new Uint8Array(4);
+    for (let i=0; i<4; i++) buff[i] = type.charCodeAt(i);
+    await fd.write(buff, 0); // Magic "r1cs"
+
+    await fd.writeULE32(version); // Version
+    await fd.writeULE32(nSections); // Number of Sections
+
+    return fd;
+}
+
+export async function startWriteSection(fd, idSection) {
+    if (typeof fd.writingSection !== "undefined") throw new Error("Already writing a section");
+    await fd.writeULE32(idSection); // Header type
+    fd.writingSection = {
+        pSectionSize: fd.pos
+    };
+    await fd.writeULE64(0); // Temporally set to 0 length
+}
+
+export async function endWriteSection(fd) {
+    if (typeof fd.writingSection === "undefined") throw new Error("Not writing a section");
+
+    const sectionSize = fd.pos - fd.writingSection.pSectionSize - 8;
+    const oldPos = fd.pos;
+    fd.pos = fd.writingSection.pSectionSize;
+    await fd.writeULE64(sectionSize);
+    fd.pos = oldPos;
+    delete fd.writingSection;
+}
+
+export async function startReadUniqueSection(fd, sections, idSection) {
+    if (typeof fd.readingSection !== "undefined") throw new Error("Already reading a section");
+    if (!sections[idSection])  throw new Error(fd.fileName + ": Missing section "+ idSection );
+    if (sections[idSection].length>1) throw new Error(fd.fileName +": Section Duplicated " +idSection);
+
+    fd.pos = sections[idSection][0].p;
+
+    fd.readingSection = sections[idSection][0];
+}
+
+export async function endReadSection(fd, noCheck) {
+    if (typeof fd.readingSection === "undefined") throw new Error("Not reading a section");
+    if (!noCheck) {
+        if (fd.pos-fd.readingSection.p !=  fd.readingSection.size) throw new Error("Invalid section size reading");
+    }
+    delete fd.readingSection;
+}
+
+export async function writeBigInt(fd, n, n8, pos) {
+    const buff = new Uint8Array(n8);
+    Scalar.toRprLE(buff, 0, n, n8);
+    await fd.write(buff, pos);
+}
+
+export async function readBigInt(fd, n8, pos) {
+    const buff = await fd.read(n8, pos);
+    return Scalar.fromRprLE(buff, 0, n8);
+}
+
+export async function copySection(fdFrom, sections, fdTo, sectionId, size) {
+    if (typeof size === "undefined") {
+        size = sections[sectionId][0].size;
+    }
+    const chunkSize = fdFrom.pageSize;
+    await startReadUniqueSection(fdFrom, sections, sectionId);
+    await startWriteSection(fdTo, sectionId);
+    for (let p=0; p<size; p+=chunkSize) {
+        const l = Math.min(size -p, chunkSize);
+        const buff = await fdFrom.read(l);
+        await fdTo.write(buff);
+    }
+    await endWriteSection(fdTo);
+    await endReadSection(fdFrom, size != sections[sectionId][0].size);
+
+}
+
+export async function readSection(fd, sections, idSection, offset, length) {
+
+    offset = (typeof offset === "undefined") ? 0 : offset;
+    length = (typeof length === "undefined") ? sections[idSection][0].size - offset : length;
+
+    if (offset + length > sections[idSection][0].size) {
+        throw new Error("Reading out of the range of the section");
+    }
+
+    let buff;
+    if (length < (1 << 30) ) {
+        buff = new Uint8Array(length);
+    } else {
+        buff = new BigBuffer(length);
+    }
+
+    await fd.readToBuffer(buff, 0, length, sections[idSection][0].p + offset);
+    return buff;
+}
+
+export async function sectionIsEqual(fd1, sections1, fd2, sections2, idSection) {
+    const MAX_BUFF_SIZE = fd1.pageSize * 16;
+    await startReadUniqueSection(fd1, sections1, idSection);
+    await startReadUniqueSection(fd2, sections2, idSection);
+    if (sections1[idSection][0].size != sections2[idSection][0].size) return false;
+    const totalBytes=sections1[idSection][0].size;
+    for (let i=0; i<totalBytes; i+= MAX_BUFF_SIZE) {
+        const n = Math.min(totalBytes-i, MAX_BUFF_SIZE);
+        const buff1 = await fd1.read(n);
+        const buff2 = await fd2.read(n);
+        for (let j=0; j<n; j++) if (buff1[j] != buff2[j]) return false;
+    }
+    await endReadSection(fd1);
+    await endReadSection(fd2);
+    return true;
+}
+
+
+
+---
+File: /@zk-email/helpers/node_modules/@iden3/binfileutils/rollup.cjs.config.js
+---
+
+import fs from "fs";
+import { builtinModules as builtin } from "module";
+
+const pkg = JSON.parse(fs.readFileSync("./package.json"));
+
+export default {
+    input: "./src/binfileutils.js",
+    output: {
+        file: "build/main.cjs",
+        format: "cjs",
+    },
+    external: [
+        ...Object.keys(pkg.dependencies),
+        ...builtin,
+    ]
+};
+
+
+
+---
+File: /@zk-email/helpers/node_modules/circom_runtime/c/old/buildasm/old/buildfieldasm.js
+---
+
+const tester = require("../c/buildasm/buildzqfieldtester2.js");
+
+const bigInt = require("big-integer");
+
+const __P__ = new bigInt("21888242871839275222246405745257275088548364400416034343698204186575808495617");
+
+
+describe("basic cases", function () {
+    this.timeout(100000);
+    it("should do basic tests", async () => {
+        await tester(__P__, [
+            ["add", 0, 0],
+            ["add", 0, 1],
+            ["add", 1, 0],
+            ["add", 1, 1],
+            ["add", 2, 1],
+            ["add", 2, 10],
+            ["add", -1, -1],
+            ["add", -20, -10],
+            ["add", "10604728079509999371218483608188593244163417117449316147628604036713980815027", "10604728079509999371218483608188593244163417117449316147628604036713980815027"],
+
+            ["mul", 0, 0],
+            ["mul", 0, 1],
+            ["mul", 1, 0],
+            ["mul", 1, 1],
+            ["mul", 2, 1],
+            ["mul", 2, 10],
+            ["mul", -1, -1],
+            ["mul", -20, -10],
+            ["mul", "10604728079509999371218483608188593244163417117449316147628604036713980815027", "10604728079509999371218483608188593244163417117449316147628604036713980815027"],
+        ]);
+    });
+});
+
+
+
+---
+File: /@zk-email/helpers/node_modules/circom_runtime/c/old/buildasm/old/buildzqfield.js
+---
+
+const bigInt=require("big-integer");
+
+
+
+
+
+class ZqBuilder {
+    constructor(q, name) {
+        this.q=bigInt(q);
+        this.h = [];
+        this.c = [];
+        this.name = name;
+    }
+
+    build() {
+        this._buildHeaders();
+        this._buildAdd();
+        this._buildMul();
+
+        this.c.push(""); this.h.push("");
+        return [this.h.join("\n"), this.c.join("\n")];
+    }
+
+    _buildHeaders() {
+        this.n64 = Math.floor((this.q.bitLength() - 1) / 64)+1;
+        this.h.push("typedef unsigned long long u64;");
+        this.h.push(`typedef u64 ${this.name}Element[${this.n64}];`);
+        this.h.push(`typedef u64 *P${this.name}Element;`);
+        this.h.push(`extern ${this.name}Element ${this.name}_q;`);
+        this.h.push(`#define ${this.name}_N64 ${this.n64}`);
+        this.c.push(`#include "${this.name.toLowerCase()}.h"`);
+        this._defineConstant(`${this.name}_q`, this.q);
+        this.c.push(""); this.h.push("");
+    }
+
+    _defineConstant(n, v) {
+        let S = `${this.name}Element ${n}={`;
+        const mask = bigInt("FFFFFFFFFFFFFFFF", 16);
+        for (let i=0; i<this.n64; i++) {
+            if (i>0) S = S+",";
+            let shex = v.shiftRight(i*64).and(mask).toString(16);
+            while (shex <16) shex = "0" + shex;
+            S = S + "0x" + shex + "ULL";
+        }
+        S += "};";
+        this.c.push(S);
+    }
+
+    _buildAdd() {
+        this.h.push(`void ${this.name}_add(P${this.name}Element r, P${this.name}Element a, P${this.name}Element b);`);
+        this.c.push(`void ${this.name}_add(P${this.name}Element r, P${this.name}Element a, P${this.name}Element b) {`);
+        this.c.push("    __asm__ __volatile__ (");
+        for (let i=0; i<this.n64; i++) {
+            this.c.push(`        "movq ${i*8}(%2), %%rax;"`);
+            this.c.push(`        "${i==0 ? "addq" : "adcq"} ${i*8}(%1), %%rax;"`);
+            this.c.push(`        "movq %%rax, ${i*8}(%0);"`);
+        }
+        this.c.push("        \"jc SQ;\"");
+        for (let i=0; i<this.n64; i++) {
+            if (i>0) {
+                this.c.push(`        "movq ${(this.n64 - i-1)*8}(%0), %%rax;"`);
+            }
+            this.c.push(`        "cmp ${(this.n64 - i-1)*8}(%3), %%rax;"`);
+            this.c.push("        \"jg SQ;\"");
+            this.c.push("        \"jl DONE;\"");
+        }
+        this.c.push("        \"SQ:\"");
+        for (let i=0; i<this.n64; i++) {
+            this.c.push(`        "movq ${i*8}(%3), %%rax;"`);
+            this.c.push(`        "${i==0 ? "subq" : "sbbq"} %%rax, ${i*8}(%0);"`);
+        }
+        this.c.push("        \"DONE:\"");
+        this.c.push(`    :: "r" (r), "r" (a), "r" (b), "r" (${this.name}_q) : "%rax", "memory");`);
+        this.c.push("}\n");
+    }
+
+    _buildMul() {
+
+        let r0, r1, r2;
+        function setR(step) {
+            if ((step % 3) == 0) {
+                r0 = "%%r8";
+                r1 = "%%r9";
+                r2 = "%%r10";
+            } else if ((step % 3) == 1) {
+                r0 = "%%r9";
+                r1 = "%%r10";
+                r2 = "%%r8";
+            } else {
+                r0 = "%%r10";
+                r1 = "%%r8";
+                r2 = "%%r9";
+            }
+        }
+        const base = bigInt.one.shiftLeft(64);
+        const np64 = base.minus(this.q.modInv(base));
+
+        this.h.push(`void ${this.name}_mul(P${this.name}Element r, P${this.name}Element a, P${this.name}Element b);`);
+        this.c.push(`void ${this.name}_mul(P${this.name}Element r, P${this.name}Element a, P${this.name}Element b) {`);
+        this.c.push("    __asm__ __volatile__ (");
+
+        this.c.push(`        "subq $${this.n64*8}, %%rsp;"`);
+        this.c.push(`        "movq $0x${np64.toString(16)}, %%r11;"`);
+        this.c.push("        \"movq $0x0, %%r8;\"");
+        this.c.push("        \"movq $0x0, %%r9;\"");
+        this.c.push("        \"movq $0x0, %%r10;\"");
+
+        for (let i=0; i<this.n64*2; i++) {
+            setR(i);
+
+            for (let o1=Math.max(0, i-this.n64+1); (o1<=i)&&(o1<this.n64); o1++) {
+                const o2= i-o1;
+                this.c.push(`        "movq ${o1*8}(%1), %%rax;"`);
+                this.c.push(`        "mulq ${o2*8}(%2);"`);
+                this.c.push(`        "addq %%rax, ${r0};"`);
+                this.c.push(`        "adcq %%rdx, ${r1};"`);
+                this.c.push(`        "adcq $0x0, ${r2};"`);
+            }
+
+            for (let j=i-1; j>=0; j--) {
+                if (((i-j)<this.n64)&&(j<this.n64)) {
+                    this.c.push(`        "movq ${j*8}(%%rsp), %%rax;"`);
+                    this.c.push(`        "mulq ${(i-j)*8}(%3);"`);
+                    this.c.push(`        "addq %%rax, ${r0};"`);
+                    this.c.push(`        "adcq %%rdx, ${r1};"`);
+                    this.c.push(`        "adcq $0x0, ${r2};"`);
+                }
+            }
+
+            if (i<this.n64) {
+                this.c.push(`        "movq ${r0}, %%rax;"`);
+                this.c.push("        \"mulq %%r11;\"");
+                this.c.push(`        "movq %%rax, ${i*8}(%%rsp);"`);
+                this.c.push("        \"mulq (%3);\"");
+                this.c.push(`        "addq %%rax, ${r0};"`);
+                this.c.push(`        "adcq %%rdx, ${r1};"`);
+                this.c.push(`        "adcq $0x0, ${r2};"`);
+            } else {
+                this.c.push(`        "movq ${r0}, ${(i-this.n64)*8}(%0);"`);
+                this.c.push(`        "movq $0, ${r0};"`);
+            }
+        }
+
+        this.c.push(`        "cmp  $0, ${r1};"`);
+        this.c.push("        \"jne SQ2;\"");
+        for (let i=0; i<this.n64; i++) {
+            this.c.push(`        "movq ${(this.n64 - i-1)*8}(%0), %%rax;"`);
+            this.c.push(`        "cmp ${(this.n64 - i-1)*8}(%3), %%rax;"`);
+            this.c.push("        \"jg SQ2;\"");
+            this.c.push("        \"jl DONE2;\"");
+        }
+        this.c.push("        \"SQ2:\"");
+        for (let i=0; i<this.n64; i++) {
+            this.c.push(`        "movq ${i*8}(%3), %%rax;"`);
+            this.c.push(`        "${i==0 ? "subq" : "sbbq"} %%rax, ${i*8}(%0);"`);
+        }
+        this.c.push("        \"DONE2:\"");
+        this.c.push(`        "addq $${this.n64*8}, %%rsp;"`);
+
+        this.c.push(`    :: "r" (r), "r" (a), "r" (b), "r" (${this.name}_q) : "%rax", "%rdx", "%r8", "%r9", "%r10", "%r11", "memory");`);
+        this.c.push("}\n");
+    }
+
+    _buildIDiv() {
+        this.h.push(`void ${this.name}_idiv(P${this.name}Element r, P${this.name}Element a, P${this.name}Element b);`);
+        this.c.push(`void ${this.name}_idiv(P${this.name}Element r, P${this.name}Element a, P${this.name}Element b) {`);
+        this.c.push("    __asm__ __volatile__ (");
+        this.c.push("        \"pxor %%xmm0, %%xmm0;\"");  // Comparison Register
+        if (this.n64 == 1) {
+            this.c.push(`        "mov %%rax, $${this.n64 - 8};"`);
+
+        } else {
+            this.c.push(`        "mov %%rax, $${this.n64 -16};"`);
+        }
+
+        this.c.push(`    :: "r" (r), "r" (a), "r" (b), "r" (${this.name}_q) : "%rax", "%rdx", "%r8", "%r9", "%r10", "%r11", "memory");`);
+        this.c.push("}\n");
+    }
+}
+
+var runningAsScript = !module.parent;
+
+if (runningAsScript) {
+    const fs = require("fs");
+    var argv = require("yargs")
+        .usage("Usage: $0 -q [primeNum] -n [name] -oc [out .c file] -oh [out .h file]")
+        .demandOption(["q","n"])
+        .alias("q", "prime")
+        .alias("n", "name")
+        .argv;
+
+    const q = bigInt(argv.q);
+
+    const cFileName =  (argv.oc) ? argv.oc : argv.name.toLowerCase() + ".c";
+    const hFileName =  (argv.oh) ? argv.oh : argv.name.toLowerCase() + ".h";
+
+    const builder = new ZqBuilder(q, argv.name);
+
+    const res = builder.build();
+
+    fs.writeFileSync(hFileName, res[0], "utf8");
+    fs.writeFileSync(cFileName, res[1], "utf8");
+} else {
+    module.exports = function(q, name) {
+        const builder = new ZqBuilder(q, name);
+        return builder.build();
+    };
+}
+
+
+
+
+---
+File: /@zk-email/helpers/node_modules/circom_runtime/c/old/buildasm/old/buildzqfieldtester.js
+---
+
+const chai = require("chai");
+const assert = chai.assert;
+
+const fs = require("fs");
+var tmp = require("tmp-promise");
+const path = require("path");
+const util = require("util");
+const exec = util.promisify(require("child_process").exec);
+
+const bigInt = require("big-integer");
+const BuildZqField = require("./buildzqfield");
+const ZqField = require("fflib").ZqField;
+
+module.exports = testField;
+
+function toMontgomeryStr(a, prime) {
+    const n64 = Math.floor((prime.bitLength() - 1) / 64)+1;
+    return a.shiftLeft(n64*64).mod(prime).toString(10);
+}
+
+function fromMontgomeryStr(a, prime) {
+    const n64 = Math.floor((prime.bitLength() - 1) / 64)+1;
+    const R = bigInt.one.shiftLeft(n64*64).mod(prime);
+    const RI = R.modInv(prime);
+    return bigInt(a).times(RI).mod(prime);
+}
+
+
+async function  testField(prime, test) {
+    tmp.setGracefulCleanup();
+
+    const F = new ZqField(prime);
+
+    const dir = await tmp.dir({prefix: "circom_", unsafeCleanup: true });
+
+    const [hSource, cSource] = BuildZqField(prime, "Fr");
+
+    await fs.promises.writeFile(path.join(dir.path, "fr.h"), hSource, "utf8");
+    await fs.promises.writeFile(path.join(dir.path, "fr.c"), cSource, "utf8");
+
+    await exec("g++" +
+               ` ${path.join(__dirname,  "tester.c")}` +
+               ` ${path.join(dir.path,  "fr.c")}` +
+               ` -o ${path.join(dir.path, "tester")}` +
+               " -lgmp"
+    );
+
+    for (let i=0; i<test.length; i++) {
+        let a = bigInt(test[i][1]).mod(prime);
+        if (a.isNegative()) a = prime.add(a);
+        let b = bigInt(test[i][2]).mod(prime);
+        if (b.isNegative()) b = prime.add(b);
+        const ec = F[test[i][0]](a,b);
+        // console.log(toMontgomeryStr(a, prime));
+        // console.log(toMontgomeryStr(b, prime));
+        const res = await exec(`${path.join(dir.path, "tester")}` +
+            ` ${test[i][0]}` +
+            ` ${toMontgomeryStr(a, prime)}` +
+            ` ${toMontgomeryStr(b, prime)}`
+        );
+        // console.log(res.stdout);
+        const c=fromMontgomeryStr(res.stdout, prime);
+
+        assert.equal(ec.toString(), c.toString());
+    }
+
+}
+
+
+
+
+---
+File: /@zk-email/helpers/node_modules/circom_runtime/c/old/buildasm/buildzqfield.js
+---
+
+const bigInt=require("big-integer");
+const path = require("path");
+const util = require("util");
+const renderFile = util.promisify(require("ejs").renderFile);
+
+const runningAsScript = !module.parent;
+
+
+class ZqBuilder {
+    constructor(q, name) {
+        const self = this;
+        this.q=bigInt(q);
+        this.n64 = Math.floor((this.q.bitLength() - 1) / 64)+1;
+        this.name = name;
+        this.bigInt = bigInt;
+        this.lastTmp=0;
+        this.global = {};
+        this.global.tmpLabel = function(label) {
+            self.lastTmp++;
+            label = label || "tmp";
+            return label+"_"+self.lastTmp;
+        };
+    }
+
+    constantElement(v) {
+        let S = "";
+        const mask = bigInt("FFFFFFFFFFFFFFFF", 16);
+        for (let i=0; i<this.n64; i++) {
+            if (i>0) S = S+",";
+            let shex = v.shiftRight(i*64).and(mask).toString(16);
+            while (shex.length <16) shex = "0" + shex;
+            S = S + "0x" + shex;
+        }
+        return S;
+    }
+
+}
+
+async function buildField(q, name) {
+    const builder = new ZqBuilder(q, name);
+
+    const asm = await renderFile(path.join(__dirname, "fr.asm.ejs"), builder);
+    const c = await renderFile(path.join(__dirname, "fr.c.ejs"), builder);
+    const h = await renderFile(path.join(__dirname, "fr.h.ejs"), builder);
+
+    return {asm: asm, h: h, c: c};
+}
+
+if (runningAsScript) {
+    const fs = require("fs");
+    var argv = require("yargs")
+        .usage("Usage: $0 -q [primeNum] -n [name] -oc [out .c file] -oh [out .h file]")
+        .demandOption(["q","n"])
+        .alias("q", "prime")
+        .alias("n", "name")
+        .argv;
+
+    const q = bigInt(argv.q);
+
+    const asmFileName =  (argv.oc) ? argv.oc : argv.name.toLowerCase() + ".asm";
+    const hFileName =  (argv.oc) ? argv.oc : argv.name.toLowerCase() + ".h";
+    const cFileName =  (argv.oc) ? argv.oc : argv.name.toLowerCase() + ".c";
+
+    buildField(q, argv.name).then( (res) => {
+        fs.writeFileSync(asmFileName, res.asm, "utf8");
+        fs.writeFileSync(hFileName, res.h, "utf8");
+        fs.writeFileSync(cFileName, res.c, "utf8");
+    });
+
+} else {
+    module.exports = buildField;
+}
+
+
+
+---
+File: /@zk-email/helpers/node_modules/circom_runtime/c/old/buildasm/buildzqfieldtester.js
+---
+
+const chai = require("chai");
+const assert = chai.assert;
+
+const fs = require("fs");
+var tmp = require("tmp-promise");
+const path = require("path");
+const util = require("util");
+const exec = util.promisify(require("child_process").exec);
+
+const BuildZqField = require("./buildzqfield");
+
+module.exports = testField;
+
+async function  testField(prime, test) {
+    tmp.setGracefulCleanup();
+
+    const dir = await tmp.dir({prefix: "circom_", unsafeCleanup: true });
+
+    const source = await BuildZqField(prime, "Fr");
+
+    // console.log(dir.path);
+
+    await fs.promises.writeFile(path.join(dir.path, "fr.asm"), source.asm, "utf8");
+    await fs.promises.writeFile(path.join(dir.path, "fr.h"), source.h, "utf8");
+    await fs.promises.writeFile(path.join(dir.path, "fr.c"), source.c, "utf8");
+
+    await exec(`cp  ${path.join(__dirname,  "tester.cpp")} ${dir.path}`);
+
+    await exec("nasm -fmacho64 --prefix _ " +
+               ` ${path.join(dir.path,  "fr.asm")}`
+    );
+
+    await exec("g++" +
+               ` ${path.join(dir.path,  "tester.cpp")}` +
+               ` ${path.join(dir.path,  "fr.o")}` +
+               ` ${path.join(dir.path,  "fr.c")}` +
+               ` -o ${path.join(dir.path, "tester")}` +
+               " -lgmp -g"
+    );
+
+    const inLines = [];
+    for (let i=0; i<test.length; i++) {
+        for (let j=0; j<test[i][0].length; j++) {
+            inLines.push(test[i][0][j]);
+        }
+    }
+    inLines.push("");
+
+    await fs.promises.writeFile(path.join(dir.path, "in.tst"), inLines.join("\n"), "utf8");
+
+    await exec(`${path.join(dir.path, "tester")}` +
+        ` <${path.join(dir.path, "in.tst")}` +
+        ` >${path.join(dir.path, "out.tst")}`);
+
+    const res = await fs.promises.readFile(path.join(dir.path, "out.tst"), "utf8");
+    const resLines = res.split("\n");
+
+    for (let i=0; i<test.length; i++) {
+        const expected = test[i][1].toString();
+        const calculated = resLines[i];
+
+        if (calculated != expected) {
+            console.log("FAILED");
+            for (let j=0; j<test[i][0].length; j++) {
+                console.log(test[i][0][j]);
+            }
+            console.log("Should Return: " + expected);
+            console.log("But Returns: " + calculated);
+        }
+
+        assert.equal(calculated, expected);
+    }
+
+}
+
+
+
+
+---
+File: /@zk-email/helpers/node_modules/circom_runtime/c/old/buildasm/tester.cpp
+---
+
+#include <string>
+#include <iostream>
+
+#include <regex>
+#include <string>
+#include <iostream>
+#include <stdexcept>
+#include <sstream>
+
+#include <stdio.h>      /* printf, NULL */
+#include <stdlib.h>
+#include <cassert>
+
+
+#include "fr.h"
+
+
+typedef void (*Func1)(PFrElement, PFrElement);
+typedef void (*Func2)(PFrElement, PFrElement, PFrElement);
+typedef void *FuncAny;
+
+typedef struct {
+    FuncAny fn;
+    int nOps;
+} FunctionSpec;
+
+std::map<std::string, FunctionSpec> functions;
+std::vector<FrElement> stack;
+
+void addFunction(std::string name, FuncAny f, int nOps) {
+    FunctionSpec fs;
+    fs.fn = f;
+    fs.nOps = nOps;
+    functions[name] = fs;
+}
+
+void fillMap() {
+    addFunction("add", (FuncAny)Fr_add, 2);
+    addFunction("sub", (FuncAny)Fr_sub, 2);
+    addFunction("neg", (FuncAny)Fr_neg, 1);
+    addFunction("mul", (FuncAny)Fr_mul, 2);
+    addFunction("square", (FuncAny)Fr_square, 1);
+    addFunction("idiv", (FuncAny)Fr_idiv, 2);
+    addFunction("inv", (FuncAny)Fr_inv, 1);
+    addFunction("div", (FuncAny)Fr_div, 2);
+    addFunction("band", (FuncAny)Fr_band, 2);
+    addFunction("bor", (FuncAny)Fr_bor, 2);
+    addFunction("bxor", (FuncAny)Fr_bxor, 2);
+    addFunction("bnot", (FuncAny)Fr_bnot, 1);
+    addFunction("eq", (FuncAny)Fr_eq, 2);
+    addFunction("neq", (FuncAny)Fr_neq, 2);
+    addFunction("lt", (FuncAny)Fr_lt, 2);
+    addFunction("gt", (FuncAny)Fr_gt, 2);
+    addFunction("leq", (FuncAny)Fr_leq, 2);
+    addFunction("geq", (FuncAny)Fr_geq, 2);
+    addFunction("land", (FuncAny)Fr_land, 2);
+    addFunction("lor", (FuncAny)Fr_lor, 2);
+    addFunction("lnot", (FuncAny)Fr_lnot, 1);
+    addFunction("shl", (FuncAny)Fr_shl, 2);
+    addFunction("shr", (FuncAny)Fr_shr, 2);
+}
+
+u_int64_t readInt(std::string &s) {
+    if (s.rfind("0x", 0) == 0) {
+        return std::stoull(s.substr(2), 0, 16);
+    } else {
+        return std::stoull(s, 0, 10);
+    }
+}
+
+void pushNumber(std::vector<std::string> &v) {
+    u_int64_t a;
+    if ((v.size()<1) || (v.size() > (Fr_N64+1))) {
+        printf("Invalid Size: %d  -  %d \n", v.size(), Fr_N64);

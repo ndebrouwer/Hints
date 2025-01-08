@@ -1,0 +1,2500 @@
+
+            let p =0;
+            for (let i=0; i<result.length; i++) {
+                fullBuffOut1.set(result[i][0], p);
+                fullBuffOut2.set(result[i][1], p);
+                p+=result[i][0].byteLength;
+            }
+
+            return [fullBuffOut1, fullBuffOut2];
+        };
+
+
+
+        G.fftFinal =  async function fftFinal(buff, factor) {
+            const sG = G.F.n8*3;
+            const sGout = G.F.n8*2;
+            let fnName, fnToAffine;
+            if (groupName == "G1") {
+                fnName = "g1m_fftFinal";
+                fnToAffine = "g1m_batchToAffine";
+            } else if (groupName == "G2") {
+                fnName = "g2m_fftFinal";
+                fnToAffine = "g2m_batchToAffine";
+            } else {
+                throw new Error("Invalid group");
+            }
+
+            const nPoints = Math.floor(buff.byteLength / sG);
+            if (nPoints != 1 << log2$1(nPoints)) {
+                throw new Error("Invalid number of points");
+            }
+
+            const pointsPerChunk = Math.floor(nPoints / tm.concurrency);
+
+            const opPromises = [];
+            for (let i=0; i<tm.concurrency; i++) {
+                let n;
+                if (i< tm.concurrency-1) {
+                    n = pointsPerChunk;
+                } else {
+                    n = nPoints - i*pointsPerChunk;
+                }
+                if (n==0) continue;
+                const task = [];
+                const b = buff.slice((i* pointsPerChunk)*sG, (i*pointsPerChunk+n)*sG);
+                task.push({cmd: "ALLOCSET", var: 0, buff: b});
+                task.push({cmd: "ALLOCSET", var: 1, buff: factor});
+                task.push({cmd: "CALL", fnName: fnName, params: [
+                    {var: 0},
+                    {val: n},
+                    {var: 1},
+                ]});
+                task.push({cmd: "CALL", fnName: fnToAffine, params: [
+                    {var: 0},
+                    {val: n},
+                    {var: 0},
+                ]});
+                task.push({cmd: "GET", out: 0, var: 0, len: n*sGout});
+                opPromises.push(
+                    tm.queueAction(task)
+                );
+
+            }
+
+            const result = await Promise.all(opPromises);
+
+            let fullBuffOut;
+            if (buff instanceof BigBuffer) {
+                fullBuffOut = new BigBuffer(nPoints*sGout);
+            } else {
+                fullBuffOut = new Uint8Array(nPoints*sGout);
+            }
+
+            let p =0;
+            for (let i=result.length-1; i>=0; i--) {
+                fullBuffOut.set(result[i][0], p);
+                p+=result[i][0].byteLength;
+            }
+
+            return fullBuffOut;
+        };
+    }
+
+    async function buildEngine(params) {
+
+        const tm = await buildThreadManager(params.wasm, params.singleThread);
+
+
+        const curve = {};
+
+        curve.q = e(params.wasm.q);
+        curve.r = e(params.wasm.r);
+        curve.name = params.name;
+        curve.tm = tm;
+        curve.prePSize = params.wasm.prePSize;
+        curve.preQSize = params.wasm.preQSize;
+        curve.Fr = new WasmField1(tm, "frm", params.n8r, params.r);
+        curve.F1 = new WasmField1(tm, "f1m", params.n8q, params.q);
+        curve.F2 = new WasmField2(tm, "f2m", curve.F1);
+        curve.G1 = new WasmCurve(tm, "g1m", curve.F1, params.wasm.pG1gen, params.wasm.pG1b, params.cofactorG1);
+        curve.G2 = new WasmCurve(tm, "g2m", curve.F2, params.wasm.pG2gen, params.wasm.pG2b, params.cofactorG2);
+        curve.F6 = new WasmField3(tm, "f6m", curve.F2);
+        curve.F12 = new WasmField2(tm, "ftm", curve.F6);
+
+        curve.Gt = curve.F12;
+
+        buildBatchApplyKey(curve, "G1");
+        buildBatchApplyKey(curve, "G2");
+        buildBatchApplyKey(curve, "Fr");
+
+        buildMultiexp(curve, "G1");
+        buildMultiexp(curve, "G2");
+
+        buildFFT(curve, "G1");
+        buildFFT(curve, "G2");
+        buildFFT(curve, "Fr");
+
+        buildPairing(curve);
+
+        curve.array2buffer = function(arr, sG) {
+            const buff = new Uint8Array(sG*arr.length);
+
+            for (let i=0; i<arr.length; i++) {
+                buff.set(arr[i], i*sG);
+            }
+
+            return buff;
+        };
+
+        curve.buffer2array = function(buff , sG) {
+            const n= buff.byteLength / sG;
+            const arr = new Array(n);
+            for (let i=0; i<n; i++) {
+                arr[i] = buff.slice(i*sG, i*sG+sG);
+            }
+            return arr;
+        };
+
+        return curve;
+    }
+
+    /*
+        Copyright 2019 0KIMS association.
+
+        This file is part of wasmbuilder
+
+        wasmbuilder is a free software: you can redistribute it and/or modify it
+        under the terms of the GNU General Public License as published by
+        the Free Software Foundation, either version 3 of the License, or
+        (at your option) any later version.
+
+        wasmbuilder is distributed in the hope that it will be useful, but WITHOUT
+        ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+        or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+        License for more details.
+
+        You should have received a copy of the GNU General Public License
+        along with wasmbuilder. If not, see <https://www.gnu.org/licenses/>.
+    */
+
+    function toNumber(n) {
+        let v;
+        if (typeof n=="string") {
+            if (n.slice(0,2).toLowerCase() == "0x") {
+                v = BigInteger(n.slice(2),16);
+            } else {
+                v = BigInteger(n);
+            }
+        } else {
+            v = BigInteger(n);
+        }
+        return v;
+    }
+
+    function u32(n) {
+        const b = [];
+        const v = toNumber(n);
+        b.push(v.and(0xFF).toJSNumber());
+        b.push(v.shiftRight(8).and(0xFF).toJSNumber());
+        b.push(v.shiftRight(16).and(0xFF).toJSNumber());
+        b.push(v.shiftRight(24).and(0xFF).toJSNumber());
+        return b;
+    }
+
+    function u64(n) {
+        const b = [];
+        const v = toNumber(n);
+        b.push(v.and(0xFF).toJSNumber());
+        b.push(v.shiftRight(8).and(0xFF).toJSNumber());
+        b.push(v.shiftRight(16).and(0xFF).toJSNumber());
+        b.push(v.shiftRight(24).and(0xFF).toJSNumber());
+        b.push(v.shiftRight(32).and(0xFF).toJSNumber());
+        b.push(v.shiftRight(40).and(0xFF).toJSNumber());
+        b.push(v.shiftRight(48).and(0xFF).toJSNumber());
+        b.push(v.shiftRight(56).and(0xFF).toJSNumber());
+        return b;
+    }
+
+    function toUTF8Array(str) {
+        var utf8 = [];
+        for (var i=0; i < str.length; i++) {
+            var charcode = str.charCodeAt(i);
+            if (charcode < 0x80) utf8.push(charcode);
+            else if (charcode < 0x800) {
+                utf8.push(0xc0 | (charcode >> 6),
+                          0x80 | (charcode & 0x3f));
+            }
+            else if (charcode < 0xd800 || charcode >= 0xe000) {
+                utf8.push(0xe0 | (charcode >> 12),
+                          0x80 | ((charcode>>6) & 0x3f),
+                          0x80 | (charcode & 0x3f));
+            }
+            // surrogate pair
+            else {
+                i++;
+                // UTF-16 encodes 0x10000-0x10FFFF by
+                // subtracting 0x10000 and splitting the
+                // 20 bits of 0x0-0xFFFFF into two halves
+                charcode = 0x10000 + (((charcode & 0x3ff)<<10)
+                          | (str.charCodeAt(i) & 0x3ff));
+                utf8.push(0xf0 | (charcode >>18),
+                          0x80 | ((charcode>>12) & 0x3f),
+                          0x80 | ((charcode>>6) & 0x3f),
+                          0x80 | (charcode & 0x3f));
+            }
+        }
+        return utf8;
+    }
+
+    function string(str) {
+        const bytes = toUTF8Array(str);
+        return [ ...varuint32(bytes.length), ...bytes ];
+    }
+
+    function varuint(n) {
+        const code = [];
+        let v = toNumber(n);
+        if (v.isNegative()) throw new Error("Number cannot be negative");
+        while (!v.isZero()) {
+            code.push(v.and(0x7F).toJSNumber());
+            v = v.shiftRight(7);
+        }
+        if (code.length==0) code.push(0);
+        for (let i=0; i<code.length-1; i++) {
+            code[i] = code[i] | 0x80;
+        }
+        return code;
+    }
+
+    function varint(_n) {
+        let n, sign;
+        const bits = _n.bitLength().toJSNumber();
+        if (_n<0) {
+            sign = true;
+            n = BigInteger.one.shiftLeft(bits).add(_n);
+        } else {
+            sign = false;
+            n = toNumber(_n);
+        }
+        const paddingBits = 7 - (bits % 7);
+
+        const padding = BigInteger.one.shiftLeft(paddingBits).minus(1).shiftLeft(bits);
+        const paddingMask = ((1 << (7 - paddingBits))-1) | 0x80;
+
+        const code = varuint(n.add(padding));
+
+        if (!sign) {
+            code[code.length-1] = code[code.length-1] & paddingMask;
+        }
+
+        return code;
+    }
+
+    function varint32(n) {
+        let v = toNumber(n);
+        if (v.greater(BigInteger("FFFFFFFF", 16))) throw new Error("Number too big");
+        if (v.greater(BigInteger("7FFFFFFF", 16))) v = v.minus(BigInteger("100000000",16));
+        if (v.lesser(BigInteger("-80000000", 16))) throw new Error("Number too small");
+        return varint(v);
+    }
+
+    function varint64(n) {
+        let v = toNumber(n);
+        if (v.greater(BigInteger("FFFFFFFFFFFFFFFF", 16))) throw new Error("Number too big");
+        if (v.greater(BigInteger("7FFFFFFFFFFFFFFF", 16))) v = v.minus(BigInteger("10000000000000000",16));
+        if (v.lesser(BigInteger("-8000000000000000", 16))) throw new Error("Number too small");
+        return varint(v);
+    }
+
+    function varuint32(n) {
+        let v = toNumber(n);
+        if (v.greater(BigInteger("FFFFFFFF", 16))) throw new Error("Number too big");
+        return varuint(v);
+    }
+
+    function varuint64(n) {
+        let v = toNumber(n);
+        if (v.greater(BigInteger("FFFFFFFFFFFFFFFF", 16))) throw new Error("Number too big");
+        return varuint(v);
+    }
+
+    function toHexString(byteArray) {
+        return Array.from(byteArray, function(byte) {
+            return ("0" + (byte & 0xFF).toString(16)).slice(-2);
+        }).join("");
+    }
+
+    function ident(text) {
+        if (typeof text === "string") {
+            let lines = text.split("\n");
+            for (let i=0; i<lines.length; i++) {
+                if (lines[i]) lines[i] = "    "+lines[i];
+            }
+            return lines.join("\n");
+        } else if (Array.isArray(text)) {
+            for (let i=0; i<text.length; i++ ) {
+                text[i] = ident(text[i]);
+            }
+            return text;
+        }
+    }
+
+    var toNumber_1 = toNumber;
+    var u32_1 = u32;
+    var u64_1 = u64;
+    var varuint32_1 = varuint32;
+    var varuint64_1 = varuint64;
+    var varint32_1 = varint32;
+    var varint64_1 = varint64;
+    var string_1 = string;
+    var toHexString_1 = toHexString;
+    var ident_1 = ident;
+
+    var utils$1 = {
+    	toNumber: toNumber_1,
+    	u32: u32_1,
+    	u64: u64_1,
+    	varuint32: varuint32_1,
+    	varuint64: varuint64_1,
+    	varint32: varint32_1,
+    	varint64: varint64_1,
+    	string: string_1,
+    	toHexString: toHexString_1,
+    	ident: ident_1
+    };
+
+    /*
+        Copyright 2019 0KIMS association.
+
+        This file is part of wasmbuilder
+
+        wasmbuilder is a free software: you can redistribute it and/or modify it
+        under the terms of the GNU General Public License as published by
+        the Free Software Foundation, either version 3 of the License, or
+        (at your option) any later version.
+
+        wasmbuilder is distributed in the hope that it will be useful, but WITHOUT
+        ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+        or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+        License for more details.
+
+        You should have received a copy of the GNU General Public License
+        along with wasmbuilder. If not, see <https://www.gnu.org/licenses/>.
+    */
+
+    class CodeBuilder {
+        constructor(func) {
+            this.func = func;
+            this.functionName = func.functionName;
+            this.module = func.module;
+        }
+
+        setLocal(localName, valCode) {
+            const idx = this.func.localIdxByName[localName];
+            if (idx === undefined)
+                throw new Error(`Local Variable not defined: Function: ${this.functionName} local: ${localName} `);
+            return [...valCode, 0x21, ...utils$1.varuint32( idx )];
+        }
+
+        teeLocal(localName, valCode) {
+            const idx = this.func.localIdxByName[localName];
+            if (idx === undefined)
+                throw new Error(`Local Variable not defined: Function: ${this.functionName} local: ${localName} `);
+            return [...valCode, 0x22, ...utils$1.varuint32( idx )];
+        }
+
+        getLocal(localName) {
+            const idx = this.func.localIdxByName[localName];
+            if (idx === undefined)
+                throw new Error(`Local Variable not defined: Function: ${this.functionName} local: ${localName} `);
+            return [0x20, ...utils$1.varuint32( idx )];
+        }
+
+        i64_load8_s(idxCode, _offset, _align) {
+            const offset = _offset || 0;
+            const align = (_align === undefined) ? 0 : _align;  // 8 bits alignment by default
+            return [...idxCode, 0x30, align, ...utils$1.varuint32(offset)];
+        }
+
+        i64_load8_u(idxCode, _offset, _align) {
+            const offset = _offset || 0;
+            const align = (_align === undefined) ? 0 : _align;  // 8 bits alignment by default
+            return [...idxCode, 0x31, align, ...utils$1.varuint32(offset)];
+        }
+
+        i64_load16_s(idxCode, _offset, _align) {
+            const offset = _offset || 0;
+            const align = (_align === undefined) ? 1 : _align;  // 16 bits alignment by default
+            return [...idxCode, 0x32, align, ...utils$1.varuint32(offset)];
+        }
+
+        i64_load16_u(idxCode, _offset, _align) {
+            const offset = _offset || 0;
+            const align = (_align === undefined) ? 1 : _align;  // 16 bits alignment by default
+            return [...idxCode, 0x33, align, ...utils$1.varuint32(offset)];
+        }
+
+        i64_load32_s(idxCode, _offset, _align) {
+            const offset = _offset || 0;
+            const align = (_align === undefined) ? 2 : _align;  // 32 bits alignment by default
+            return [...idxCode, 0x34, align, ...utils$1.varuint32(offset)];
+        }
+
+        i64_load32_u(idxCode, _offset, _align) {
+            const offset = _offset || 0;
+            const align = (_align === undefined) ? 2 : _align;  // 32 bits alignment by default
+            return [...idxCode, 0x35, align, ...utils$1.varuint32(offset)];
+        }
+
+        i64_load(idxCode, _offset, _align) {
+            const offset = _offset || 0;
+            const align = (_align === undefined) ? 3 : _align;  // 64 bits alignment by default
+            return [...idxCode, 0x29, align, ...utils$1.varuint32(offset)];
+        }
+
+
+        i64_store(idxCode, _offset, _align, _codeVal) {
+            let offset, align, codeVal;
+            if (Array.isArray(_offset)) {
+                offset = 0;
+                align = 3;
+                codeVal = _offset;
+            } else if (Array.isArray(_align)) {
+                offset = _offset;
+                align = 3;
+                codeVal = _align;
+            } else if (Array.isArray(_codeVal)) {
+                offset = _offset;
+                align = _align;
+                codeVal = _codeVal;
+            }
+            return [...idxCode, ...codeVal, 0x37, align, ...utils$1.varuint32(offset)];
+        }
+
+        i64_store32(idxCode, _offset, _align, _codeVal) {
+            let offset, align, codeVal;
+            if (Array.isArray(_offset)) {
+                offset = 0;
+                align = 2;
+                codeVal = _offset;
+            } else if (Array.isArray(_align)) {
+                offset = _offset;
+                align = 2;
+                codeVal = _align;
+            } else if (Array.isArray(_codeVal)) {
+                offset = _offset;
+                align = _align;
+                codeVal = _codeVal;
+            }
+            return [...idxCode, ...codeVal, 0x3e, align, ...utils$1.varuint32(offset)];
+        }
+
+
+        i64_store16(idxCode, _offset, _align, _codeVal) {
+            let offset, align, codeVal;
+            if (Array.isArray(_offset)) {
+                offset = 0;
+                align = 1;
+                codeVal = _offset;
+            } else if (Array.isArray(_align)) {
+                offset = _offset;
+                align = 1;
+                codeVal = _align;
+            } else if (Array.isArray(_codeVal)) {
+                offset = _offset;
+                align = _align;
+                codeVal = _codeVal;
+            }
+            return [...idxCode, ...codeVal, 0x3d, align, ...utils$1.varuint32(offset)];
+        }
+
+
+        i64_store8(idxCode, _offset, _align, _codeVal) {
+            let offset, align, codeVal;
+            if (Array.isArray(_offset)) {
+                offset = 0;
+                align = 0;
+                codeVal = _offset;
+            } else if (Array.isArray(_align)) {
+                offset = _offset;
+                align = 0;
+                codeVal = _align;
+            } else if (Array.isArray(_codeVal)) {
+                offset = _offset;
+                align = _align;
+                codeVal = _codeVal;
+            }
+            return [...idxCode, ...codeVal, 0x3c, align, ...utils$1.varuint32(offset)];
+        }
+
+        i32_load8_s(idxCode, _offset, _align) {
+            const offset = _offset || 0;
+            const align = (_align === undefined) ? 0 : _align;  // 32 bits alignment by default
+            return [...idxCode, 0x2c, align, ...utils$1.varuint32(offset)];
+        }
+
+        i32_load8_u(idxCode, _offset, _align) {
+            const offset = _offset || 0;
+            const align = (_align === undefined) ? 0 : _align;  // 32 bits alignment by default
+            return [...idxCode, 0x2d, align, ...utils$1.varuint32(offset)];
+        }
+
+        i32_load16_s(idxCode, _offset, _align) {
+            const offset = _offset || 0;
+            const align = (_align === undefined) ? 1 : _align;  // 32 bits alignment by default
+            return [...idxCode, 0x2e, align, ...utils$1.varuint32(offset)];
+        }
+
+        i32_load16_u(idxCode, _offset, _align) {
+            const offset = _offset || 0;
+            const align = (_align === undefined) ? 1 : _align;  // 32 bits alignment by default
+            return [...idxCode, 0x2f, align, ...utils$1.varuint32(offset)];
+        }
+
+        i32_load(idxCode, _offset, _align) {
+            const offset = _offset || 0;
+            const align = (_align === undefined) ? 2 : _align;  // 32 bits alignment by default
+            return [...idxCode, 0x28, align, ...utils$1.varuint32(offset)];
+        }
+
+        i32_store(idxCode, _offset, _align, _codeVal) {
+            let offset, align, codeVal;
+            if (Array.isArray(_offset)) {
+                offset = 0;
+                align = 2;
+                codeVal = _offset;
+            } else if (Array.isArray(_align)) {
+                offset = _offset;
+                align = 2;
+                codeVal = _align;
+            } else if (Array.isArray(_codeVal)) {
+                offset = _offset;
+                align = _align;
+                codeVal = _codeVal;
+            }
+            return [...idxCode, ...codeVal, 0x36, align, ...utils$1.varuint32(offset)];
+        }
+
+
+        i32_store16(idxCode, _offset, _align, _codeVal) {
+            let offset, align, codeVal;
+            if (Array.isArray(_offset)) {
+                offset = 0;
+                align = 1;
+                codeVal = _offset;
+            } else if (Array.isArray(_align)) {
+                offset = _offset;
+                align = 1;
+                codeVal = _align;
+            } else if (Array.isArray(_codeVal)) {
+                offset = _offset;
+                align = _align;
+                codeVal = _codeVal;
+            }
+            return [...idxCode, ...codeVal, 0x3b, align, ...utils$1.varuint32(offset)];
+        }
+
+        i32_store8(idxCode, _offset, _align, _codeVal) {
+            let offset, align, codeVal;
+            if (Array.isArray(_offset)) {
+                offset = 0;
+                align = 0;
+                codeVal = _offset;
+            } else if (Array.isArray(_align)) {
+                offset = _offset;
+                align = 0;
+                codeVal = _align;
+            } else if (Array.isArray(_codeVal)) {
+                offset = _offset;
+                align = _align;
+                codeVal = _codeVal;
+            }
+            return [...idxCode, ...codeVal, 0x3a, align, ...utils$1.varuint32(offset)];
+        }
+
+        call(fnName, ...args) {
+            const idx = this.module.functionIdxByName[fnName];
+            if (idx === undefined)
+                throw new Error(`Function not defined: Function: ${fnName}`);
+            return [...[].concat(...args), 0x10, ...utils$1.varuint32(idx)];
+        }
+
+        call_indirect(fnIdx, ...args) {
+            return [...[].concat(...args), ...fnIdx, 0x11, 0, 0];
+        }
+
+        if(condCode, thenCode, elseCode) {
+            if (elseCode) {
+                return [...condCode, 0x04, 0x40, ...thenCode, 0x05, ...elseCode, 0x0b];
+            } else {
+                return [...condCode, 0x04, 0x40, ...thenCode, 0x0b];
+            }
+        }
+
+        block(bCode) { return [0x02, 0x40, ...bCode, 0x0b]; }
+        loop(...args) {
+            return [0x03, 0x40, ...[].concat(...[...args]), 0x0b];
+        }
+        br_if(relPath, condCode) { return [...condCode, 0x0d, ...utils$1.varuint32(relPath)]; }
+        br(relPath) { return [0x0c, ...utils$1.varuint32(relPath)]; }
+        ret(rCode) { return [...rCode, 0x0f]; }
+        drop(dCode) { return [...dCode,  0x1a]; }
+
+        i64_const(num) { return [0x42, ...utils$1.varint64(num)]; }
+        i32_const(num) { return [0x41, ...utils$1.varint32(num)]; }
+
+
+        i64_eqz(opcode) { return [...opcode, 0x50]; }
+        i64_eq(op1code, op2code) { return [...op1code, ...op2code, 0x51]; }
+        i64_ne(op1code, op2code) { return [...op1code, ...op2code, 0x52]; }
+        i64_lt_s(op1code, op2code) { return [...op1code, ...op2code, 0x53]; }
+        i64_lt_u(op1code, op2code) { return [...op1code, ...op2code, 0x54]; }
+        i64_gt_s(op1code, op2code) { return [...op1code, ...op2code, 0x55]; }
+        i64_gt_u(op1code, op2code) { return [...op1code, ...op2code, 0x56]; }
+        i64_le_s(op1code, op2code) { return [...op1code, ...op2code, 0x57]; }
+        i64_le_u(op1code, op2code) { return [...op1code, ...op2code, 0x58]; }
+        i64_ge_s(op1code, op2code) { return [...op1code, ...op2code, 0x59]; }
+        i64_ge_u(op1code, op2code) { return [...op1code, ...op2code, 0x5a]; }
+        i64_add(op1code, op2code) { return [...op1code, ...op2code, 0x7c]; }
+        i64_sub(op1code, op2code) { return [...op1code, ...op2code, 0x7d]; }
+        i64_mul(op1code, op2code) { return [...op1code, ...op2code, 0x7e]; }
+        i64_div_s(op1code, op2code) { return [...op1code, ...op2code, 0x7f]; }
+        i64_div_u(op1code, op2code) { return [...op1code, ...op2code, 0x80]; }
+        i64_rem_s(op1code, op2code) { return [...op1code, ...op2code, 0x81]; }
+        i64_rem_u(op1code, op2code) { return [...op1code, ...op2code, 0x82]; }
+        i64_and(op1code, op2code) { return [...op1code, ...op2code, 0x83]; }
+        i64_or(op1code, op2code) { return [...op1code, ...op2code, 0x84]; }
+        i64_xor(op1code, op2code) { return [...op1code, ...op2code, 0x85]; }
+        i64_shl(op1code, op2code) { return [...op1code, ...op2code, 0x86]; }
+        i64_shr_s(op1code, op2code) { return [...op1code, ...op2code, 0x87]; }
+        i64_shr_u(op1code, op2code) { return [...op1code, ...op2code, 0x88]; }
+        i64_extend_i32_s(op1code) { return [...op1code, 0xac]; }
+        i64_extend_i32_u(op1code) { return [...op1code, 0xad]; }
+        i64_clz(op1code) { return [...op1code, 0x79]; }
+        i64_ctz(op1code) { return [...op1code, 0x7a]; }
+
+        i32_eqz(op1code) { return [...op1code, 0x45]; }
+        i32_eq(op1code, op2code) { return [...op1code, ...op2code, 0x46]; }
+        i32_ne(op1code, op2code) { return [...op1code, ...op2code, 0x47]; }
+        i32_lt_s(op1code, op2code) { return [...op1code, ...op2code, 0x48]; }
+        i32_lt_u(op1code, op2code) { return [...op1code, ...op2code, 0x49]; }
+        i32_gt_s(op1code, op2code) { return [...op1code, ...op2code, 0x4a]; }
+        i32_gt_u(op1code, op2code) { return [...op1code, ...op2code, 0x4b]; }
+        i32_le_s(op1code, op2code) { return [...op1code, ...op2code, 0x4c]; }
+        i32_le_u(op1code, op2code) { return [...op1code, ...op2code, 0x4d]; }
+        i32_ge_s(op1code, op2code) { return [...op1code, ...op2code, 0x4e]; }
+        i32_ge_u(op1code, op2code) { return [...op1code, ...op2code, 0x4f]; }
+        i32_add(op1code, op2code) { return [...op1code, ...op2code, 0x6a]; }
+        i32_sub(op1code, op2code) { return [...op1code, ...op2code, 0x6b]; }
+        i32_mul(op1code, op2code) { return [...op1code, ...op2code, 0x6c]; }
+        i32_div_s(op1code, op2code) { return [...op1code, ...op2code, 0x6d]; }
+        i32_div_u(op1code, op2code) { return [...op1code, ...op2code, 0x6e]; }
+        i32_rem_s(op1code, op2code) { return [...op1code, ...op2code, 0x6f]; }
+        i32_rem_u(op1code, op2code) { return [...op1code, ...op2code, 0x70]; }
+        i32_and(op1code, op2code) { return [...op1code, ...op2code, 0x71]; }
+        i32_or(op1code, op2code) { return [...op1code, ...op2code, 0x72]; }
+        i32_xor(op1code, op2code) { return [...op1code, ...op2code, 0x73]; }
+        i32_shl(op1code, op2code) { return [...op1code, ...op2code, 0x74]; }
+        i32_shr_s(op1code, op2code) { return [...op1code, ...op2code, 0x75]; }
+        i32_shr_u(op1code, op2code) { return [...op1code, ...op2code, 0x76]; }
+        i32_rotl(op1code, op2code) { return [...op1code, ...op2code, 0x77]; }
+        i32_rotr(op1code, op2code) { return [...op1code, ...op2code, 0x78]; }
+        i32_wrap_i64(op1code) { return [...op1code, 0xa7]; }
+        i32_clz(op1code) { return [...op1code, 0x67]; }
+        i32_ctz(op1code) { return [...op1code, 0x68]; }
+
+        unreachable() { return [ 0x0 ]; }
+
+        current_memory() { return [ 0x3f, 0]; }
+
+        comment() { return []; }
+    }
+
+    var codebuilder = CodeBuilder;
+
+    /*
+        Copyright 2019 0KIMS association.
+
+        This file is part of wasmbuilder
+
+        wasmbuilder is a free software: you can redistribute it and/or modify it
+        under the terms of the GNU General Public License as published by
+        the Free Software Foundation, either version 3 of the License, or
+        (at your option) any later version.
+
+        wasmbuilder is distributed in the hope that it will be useful, but WITHOUT
+        ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+        or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+        License for more details.
+
+        You should have received a copy of the GNU General Public License
+        along with wasmbuilder. If not, see <https://www.gnu.org/licenses/>.
+    */
+
+    const typeCodes = {
+        "i32": 0x7f,
+        "i64": 0x7e,
+        "f32": 0x7d,
+        "f64": 0x7c,
+        "anyfunc": 0x70,
+        "func": 0x60,
+        "emptyblock": 0x40
+    };
+
+
+    class FunctionBuilder {
+
+        constructor (module, fnName, fnType, moduleName, fieldName) {
+            if (fnType == "import") {
+                this.fnType = "import";
+                this.moduleName = moduleName;
+                this.fieldName = fieldName;
+            } else if (fnType == "internal") {
+                this.fnType = "internal";
+            } else {
+                throw new Error("Invalid function fnType: " + fnType);
+            }
+            this.module = module;
+            this.fnName = fnName;
+            this.params = [];
+            this.locals = [];
+            this.localIdxByName = {};
+            this.code = [];
+            this.returnType = null;
+            this.nextLocal =0;
+        }
+
+        addParam(paramName, paramType) {
+            if (this.localIdxByName[paramName])
+                throw new Error(`param already exists. Function: ${this.fnName}, Param: ${paramName} `);
+            const idx = this.nextLocal++;
+            this.localIdxByName[paramName] = idx;
+            this.params.push({
+                type: paramType
+            });
+        }
+
+        addLocal(localName, localType, _length) {
+            const length = _length || 1;
+            if (this.localIdxByName[localName])
+                throw new Error(`local already exists. Function: ${this.fnName}, Param: ${localName} `);
+            const idx = this.nextLocal++;
+            this.localIdxByName[localName] = idx;
+            this.locals.push({
+                type: localType,
+                length: length
+            });
+        }
+
+        setReturnType(returnType) {
+            if (this.returnType)
+                throw new Error(`returnType already defined. Function: ${this.fnName}`);
+            this.returnType = returnType;
+        }
+
+        getSignature() {
+            const params = [...utils$1.varuint32(this.params.length), ...this.params.map((p) => typeCodes[p.type])];
+            const returns = this.returnType ? [0x01, typeCodes[this.returnType]] : [0];
+            return [0x60, ...params, ...returns];
+        }
+
+        getBody() {
+            const locals = this.locals.map((l) => [
+                ...utils$1.varuint32(l.length),
+                typeCodes[l.type]
+            ]);
+
+            const body = [
+                ...utils$1.varuint32(this.locals.length),
+                ...[].concat(...locals),
+                ...this.code,
+                0x0b
+            ];
+            return [
+                ...utils$1.varuint32(body.length),
+                ...body
+            ];
+        }
+
+        addCode(...code) {
+            this.code.push(...[].concat(...[...code]));
+        }
+
+        getCodeBuilder() {
+            return new codebuilder(this);
+        }
+    }
+
+    var functionbuilder = FunctionBuilder;
+
+    /*
+        Copyright 2019 0KIMS association.
+
+        This file is part of wasmbuilder
+
+        wasmbuilder is a free software: you can redistribute it and/or modify it
+        under the terms of the GNU General Public License as published by
+        the Free Software Foundation, either version 3 of the License, or
+        (at your option) any later version.
+
+        wasmbuilder is distributed in the hope that it will be useful, but WITHOUT
+        ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+        or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+        License for more details.
+
+        You should have received a copy of the GNU General Public License
+        along with wasmbuilder. If not, see <https://www.gnu.org/licenses/>.
+    */
+
+    class ModuleBuilder$1 {
+
+        constructor() {
+            this.functions = [];
+            this.functionIdxByName = {};
+            this.nImportFunctions = 0;
+            this.nInternalFunctions =0;
+            this.memory = {
+                pagesSize: 1,
+                moduleName: "env",
+                fieldName: "memory"
+            };
+            this.free = 8;
+            this.datas = [];
+            this.modules = {};
+            this.exports = [];
+            this.functionsTable = [];
+        }
+
+        build() {
+            this._setSignatures();
+            return new Uint8Array([
+                ...utils$1.u32(0x6d736100),
+                ...utils$1.u32(1),
+                ...this._buildType(),
+                ...this._buildImport(),
+                ...this._buildFunctionDeclarations(),
+                ...this._buildFunctionsTable(),
+                ...this._buildExports(),
+                ...this._buildElements(),
+                ...this._buildCode(),
+                ...this._buildData()
+            ]);
+        }
+
+        addFunction(fnName) {
+            if (typeof(this.functionIdxByName[fnName]) !== "undefined")
+                throw new Error(`Function already defined: ${fnName}`);
+
+            const idx = this.functions.length;
+            this.functionIdxByName[fnName] = idx;
+
+            this.functions.push(new functionbuilder(this, fnName, "internal"));
+
+            this.nInternalFunctions++;
+            return this.functions[idx];
+        }
+
+        addIimportFunction(fnName, moduleName, _fieldName) {
+            if (typeof(this.functionIdxByName[fnName]) !== "undefined")
+                throw new Error(`Function already defined: ${fnName}`);
+
+            if (  (this.functions.length>0)
+                &&(this.functions[this.functions.length-1].type == "internal"))
+                throw new Error(`Import functions must be declared before internal: ${fnName}`);
+
+            let fieldName = _fieldName || fnName;
+
+            const idx = this.functions.length;
+            this.functionIdxByName[fnName] = idx;
+
+            this.functions.push(new functionbuilder(this, fnName, "import", moduleName, fieldName));
+
+            this.nImportFunctions ++;
+            return this.functions[idx];
+        }
+
+        setMemory(pagesSize, moduleName, fieldName) {
+            this.memory = {
+                pagesSize: pagesSize,
+                moduleName: moduleName || "env",
+                fieldName: fieldName || "memory"
+            };
+        }
+
+        exportFunction(fnName, _exportName) {
+            const exportName = _exportName || fnName;
+            if (typeof(this.functionIdxByName[fnName]) === "undefined")
+                throw new Error(`Function not defined: ${fnName}`);
+            const idx = this.functionIdxByName[fnName];
+            if (exportName != fnName) {
+                this.functionIdxByName[exportName] = idx;
+            }
+            this.exports.push({
+                exportName: exportName,
+                idx: idx
+            });
+        }
+
+        addFunctionToTable(fnName) {
+            const idx = this.functionIdxByName[fnName];
+            this.functionsTable.push(idx);
+        }
+
+        addData(offset, bytes) {
+            this.datas.push({
+                offset: offset,
+                bytes: bytes
+            });
+        }
+
+        alloc(a, b) {
+            let size;
+            let bytes;
+            if ((Array.isArray(a) || ArrayBuffer.isView(a)) && (typeof(b) === "undefined")) {
+                size = a.length;
+                bytes = a;
+            } else {
+                size = a;
+                bytes = b;
+            }
+            size = (((size-1)>>3) +1)<<3;       // Align to 64 bits.
+            const p = this.free;
+            this.free += size;
+            if (bytes) {
+                this.addData(p, bytes);
+            }
+            return p;
+        }
+
+        allocString(s) {
+            const encoder = new globalThis.TextEncoder();
+            const uint8array = encoder.encode(s);
+            return this.alloc([...uint8array, 0]);
+        }
+
+        _setSignatures() {
+            this.signatures = [];
+            const signatureIdxByName = {};
+            if (this.functionsTable.length>0) {
+                const signature = this.functions[this.functionsTable[0]].getSignature();
+                const signatureName = "s_"+utils$1.toHexString(signature);
+                signatureIdxByName[signatureName] = 0;
+                this.signatures.push(signature);
+            }
+            for (let i=0; i<this.functions.length; i++) {
+                const signature = this.functions[i].getSignature();
+                const signatureName = "s_"+utils$1.toHexString(signature);
+                if (typeof(signatureIdxByName[signatureName]) === "undefined") {
+                    signatureIdxByName[signatureName] = this.signatures.length;
+                    this.signatures.push(signature);
+                }
+
+                this.functions[i].signatureIdx = signatureIdxByName[signatureName];
+            }
+
+        }
+
+        _buildSection(sectionType, section) {
+            return [sectionType, ...utils$1.varuint32(section.length), ...section];
+        }
+
+        _buildType() {
+            return this._buildSection(
+                0x01,
+                [
+                    ...utils$1.varuint32(this.signatures.length),
+                    ...[].concat(...this.signatures)
+                ]
+            );
+        }
+
+        _buildImport() {
+            const entries = [];
+            entries.push([
+                ...utils$1.string(this.memory.moduleName),
+                ...utils$1.string(this.memory.fieldName),
+                0x02,
+                0x00,   //Flags no init valua
+                ...utils$1.varuint32(this.memory.pagesSize)
+            ]);
+            for (let i=0; i< this.nImportFunctions; i++) {
+                entries.push([
+                    ...utils$1.string(this.functions[i].moduleName),
+                    ...utils$1.string(this.functions[i].fieldName),
+                    0x00,
+                    ...utils$1.varuint32(this.functions[i].signatureIdx)
+                ]);
+            }
+            return this._buildSection(
+                0x02,
+                utils$1.varuint32(entries.length).concat(...entries)
+            );
+        }
+
+        _buildFunctionDeclarations() {
+            const entries = [];
+            for (let i=this.nImportFunctions; i< this.nImportFunctions + this.nInternalFunctions; i++) {
+                entries.push(...utils$1.varuint32(this.functions[i].signatureIdx));
+            }
+            return this._buildSection(
+                0x03,
+                [
+                    ...utils$1.varuint32(entries.length),
+                    ...[...entries]
+                ]
+            );
+        }
+
+        _buildFunctionsTable() {
+            if (this.functionsTable.length == 0) return [];
+            return this._buildSection(
+                0x04,
+                [
+                    ...utils$1.varuint32(1),
+                    0x70, 0, ...utils$1.varuint32(this.functionsTable.length)
+                ]
+            );
+        }
+
+        _buildElements() {
+            if (this.functionsTable.length == 0) return [];
+            const entries = [];
+            for (let i=0; i<this.functionsTable.length; i++) {
+                entries.push(...utils$1.varuint32(this.functionsTable[i]));
+            }
+            return this._buildSection(
+                0x09,
+                [
+                    ...utils$1.varuint32(1),      // 1 entry
+                    ...utils$1.varuint32(0),      // Table (0 in MVP)
+                    0x41,                       // offset 0
+                    ...utils$1.varint32(0),
+                    0x0b,
+                    ...utils$1.varuint32(this.functionsTable.length), // Number of elements
+                    ...[...entries]
+                ]
+            );
+        }
+
+        _buildExports() {
+            const entries = [];
+            for (let i=0; i< this.exports.length; i++) {
+                entries.push([
+                    ...utils$1.string(this.exports[i].exportName),
+                    0x00,
+                    ...utils$1.varuint32(this.exports[i].idx)
+                ]);
+            }
+            return this._buildSection(
+                0x07,
+                utils$1.varuint32(entries.length).concat(...entries)
+            );
+        }
+
+        _buildCode() {
+            const entries = [];
+            for (let i=this.nImportFunctions; i< this.nImportFunctions + this.nInternalFunctions; i++) {
+                entries.push(this.functions[i].getBody());
+            }
+            return this._buildSection(
+                0x0a,
+                utils$1.varuint32(entries.length).concat(...entries)
+            );
+        }
+
+        _buildData() {
+            const entries = [];
+            entries.push([
+                0x00,
+                0x41,
+                0x00,
+                0x0b,
+                0x04,
+                ...utils$1.u32(this.free)
+            ]);
+            for (let i=0; i< this.datas.length; i++) {
+                entries.push([
+                    0x00,
+                    0x41,
+                    ...utils$1.varint32(this.datas[i].offset),
+                    0x0b,
+                    ...utils$1.varuint32(this.datas[i].bytes.length),
+                    ...this.datas[i].bytes,
+                ]);
+            }
+            return this._buildSection(
+                0x0b,
+                utils$1.varuint32(entries.length).concat(...entries)
+            );
+        }
+
+    }
+
+    var modulebuilder = ModuleBuilder$1;
+
+    /*
+        Copyright 2019 0KIMS association.
+
+        This file is part of wasmbuilder
+
+        wasmbuilder is a free software: you can redistribute it and/or modify it
+        under the terms of the GNU General Public License as published by
+        the Free Software Foundation, either version 3 of the License, or
+        (at your option) any later version.
+
+        wasmbuilder is distributed in the hope that it will be useful, but WITHOUT
+        ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+        or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+        License for more details.
+
+        You should have received a copy of the GNU General Public License
+        along with wasmbuilder. If not, see <https://www.gnu.org/licenses/>.
+    */
+
+    var ModuleBuilder = modulebuilder;
+
+    globalThis.curve_bn128 = null;
+
+    async function buildBn128(singleThread, plugins) {
+
+        const moduleBuilder = new ModuleBuilder();
+        moduleBuilder.setMemory(25);
+        buildBn128$1(moduleBuilder);
+
+        if (plugins) plugins(moduleBuilder);
+
+        const bn128wasm = {};
+
+        bn128wasm.code = moduleBuilder.build();
+        bn128wasm.pq = moduleBuilder.modules.f1m.pq;
+        bn128wasm.pr = moduleBuilder.modules.frm.pq;
+        bn128wasm.pG1gen = moduleBuilder.modules.bn128.pG1gen;
+        bn128wasm.pG1zero = moduleBuilder.modules.bn128.pG1zero;
+        bn128wasm.pG1b = moduleBuilder.modules.bn128.pG1b;
+        bn128wasm.pG2gen = moduleBuilder.modules.bn128.pG2gen;
+        bn128wasm.pG2zero = moduleBuilder.modules.bn128.pG2zero;
+        bn128wasm.pG2b = moduleBuilder.modules.bn128.pG2b;
+        bn128wasm.pOneT = moduleBuilder.modules.bn128.pOneT;
+        bn128wasm.prePSize = moduleBuilder.modules.bn128.prePSize;
+        bn128wasm.preQSize = moduleBuilder.modules.bn128.preQSize;
+        bn128wasm.n8q = 32;
+        bn128wasm.n8r = 32;
+        bn128wasm.q = moduleBuilder.modules.bn128.q;
+        bn128wasm.r = moduleBuilder.modules.bn128.r;
+
+        if ((!singleThread) && (globalThis.curve_bn128)) return globalThis.curve_bn128;
+        const params = {
+            name: "bn128",
+            wasm: bn128wasm,
+            q: e("21888242871839275222246405745257275088696311157297823662689037894645226208583"),
+            r: e("21888242871839275222246405745257275088548364400416034343698204186575808495617"),
+            n8q: 32,
+            n8r: 32,
+            cofactorG2: e("30644e72e131a029b85045b68181585e06ceecda572a2489345f2299c0f9fa8d", 16),
+            singleThread: singleThread ? true : false
+        };
+
+        const curve = await buildEngine(params);
+        curve.terminate = async function () {
+            if (!params.singleThread) {
+                globalThis.curve_bn128 = null;
+                await this.tm.terminate();
+            }
+        };
+
+        if (!singleThread) {
+            globalThis.curve_bn128 = curve;
+        }
+
+        return curve;
+    }
+
+    globalThis.curve_bls12381 = null;
+
+    async function buildBls12381(singleThread, plugins) {
+
+        const moduleBuilder = new ModuleBuilder();
+        moduleBuilder.setMemory(25);
+        buildBls12381$1(moduleBuilder);
+
+        if (plugins) plugins(moduleBuilder);
+
+        const bls12381wasm = {};
+
+        bls12381wasm.code = moduleBuilder.build();
+        bls12381wasm.pq = moduleBuilder.modules.f1m.pq;
+        bls12381wasm.pr = moduleBuilder.modules.frm.pq;
+        bls12381wasm.pG1gen = moduleBuilder.modules.bls12381.pG1gen;
+        bls12381wasm.pG1zero = moduleBuilder.modules.bls12381.pG1zero;
+        bls12381wasm.pG1b = moduleBuilder.modules.bls12381.pG1b;
+        bls12381wasm.pG2gen = moduleBuilder.modules.bls12381.pG2gen;
+        bls12381wasm.pG2zero = moduleBuilder.modules.bls12381.pG2zero;
+        bls12381wasm.pG2b = moduleBuilder.modules.bls12381.pG2b;
+        bls12381wasm.pOneT = moduleBuilder.modules.bls12381.pOneT;
+        bls12381wasm.prePSize = moduleBuilder.modules.bls12381.prePSize;
+        bls12381wasm.preQSize = moduleBuilder.modules.bls12381.preQSize;
+        bls12381wasm.n8q = 48;
+        bls12381wasm.n8r = 32;
+        bls12381wasm.q = moduleBuilder.modules.bn128.q;
+        bls12381wasm.r = moduleBuilder.modules.bn128.r;
+
+
+        if ((!singleThread) && (globalThis.curve_bls12381)) return globalThis.curve_bls12381;
+        const params = {
+            name: "bls12381",
+            wasm: bls12381wasm,
+            q: e("1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab", 16),
+            r: e("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001", 16),
+            n8q: 48,
+            n8r: 32,
+            cofactorG1: e("0x396c8c005555e1568c00aaab0000aaab", 16),
+            cofactorG2: e("0x5d543a95414e7f1091d50792876a202cd91de4547085abaa68a205b2e5a7ddfa628f1cb4d9e82ef21537e293a6691ae1616ec6e786f0c70cf1c38e31c7238e5", 16),
+            singleThread: singleThread ? true : false
+        };
+
+        const curve = await buildEngine(params);
+        curve.terminate = async function () {
+            if (!params.singleThread) {
+                globalThis.curve_bls12381 = null;
+                await this.tm.terminate();
+            }
+        };
+
+        if (!singleThread) {
+            globalThis.curve_bls12381 = curve;
+        }
+
+        return curve;
+    }
+
+    const bls12381r$1 = e("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001", 16);
+    const bn128r$1 = e("21888242871839275222246405745257275088548364400416034343698204186575808495617");
+
+    e("1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab", 16);
+    e("21888242871839275222246405745257275088696311157297823662689037894645226208583");
+
+    async function getCurveFromR(r, singleThread, plugins) {
+        let curve;
+        if (eq(r, bn128r$1)) {
+            curve = await buildBn128(singleThread, plugins);
+        } else if (eq(r, bls12381r$1)) {
+            curve = await buildBls12381(singleThread, plugins);
+        } else {
+            throw new Error(`Curve not supported: ${toString$6(r)}`);
+        }
+        return curve;
+    }
+
+    const Scalar=_Scalar;
+    const utils = _utils;
+
+    var fs = {};
+
+    async function open(fileName, openFlags, cacheSize, pageSize) {
+        cacheSize = cacheSize || 4096*64;
+        if (["w+", "wx+", "r", "ax+", "a+"].indexOf(openFlags) <0)
+            throw new Error("Invalid open option");
+        const fd =await fs.promises.open(fileName, openFlags);
+
+        const stats = await fd.stat();
+
+        return  new FastFile(fd, stats, cacheSize, pageSize, fileName);
+    }
+
+
+    class FastFile {
+
+        constructor(fd, stats, cacheSize, pageSize, fileName) {
+            this.fileName = fileName;
+            this.fd = fd;
+            this.pos = 0;
+            this.pageSize = pageSize || (1 << 8);
+            while (this.pageSize < stats.blksize) {
+                this.pageSize *= 2;
+            }
+            this.totalSize = stats.size;
+            this.totalPages = Math.floor((stats.size -1) / this.pageSize)+1;
+            this.maxPagesLoaded = Math.floor( cacheSize / this.pageSize)+1;
+            this.pages = {};
+            this.pendingLoads = [];
+            this.writing = false;
+            this.reading = false;
+            this.avBuffs = [];
+            this.history = {};
+        }
+
+        _loadPage(p) {
+            const self = this;
+            const P = new Promise((resolve, reject)=> {
+                self.pendingLoads.push({
+                    page: p,
+                    resolve: resolve,
+                    reject: reject
+                });
+            });
+            self.__statusPage("After Load request: ", p);
+            return P;
+        }
+
+        __statusPage(s, p) {
+            const logEntry = [];
+            const self=this;
+            if (!self.logHistory) return;
+            logEntry.push("==" + s+ " " +p);
+            let S = "";
+            for (let i=0; i<self.pendingLoads.length; i++) {
+                if (self.pendingLoads[i].page == p) S = S + " " + i;
+            }
+            if (S) logEntry.push("Pending loads:"+S);
+            if (typeof self.pages[p] != "undefined") {
+                const page = self.pages[p];
+                logEntry.push("Loaded");
+                logEntry.push("pendingOps: "+page.pendingOps);
+                if (page.loading) logEntry.push("loading: "+page.loading);
+                if (page.writing) logEntry.push("writing");
+                if (page.dirty) logEntry.push("dirty");
+            }
+            logEntry.push("==");
+
+            if (!self.history[p]) self.history[p] = [];
+            self.history[p].push(logEntry);
+        }
+
+        __printHistory(p) {
+            const self = this;
+            if (!self.history[p]) console.log("Empty History ", p);
+            console.log("History "+p);
+            for (let i=0; i<self.history[p].length; i++) {
+                for (let j=0; j<self.history[p][i].length; j++) {
+                    console.log("-> " + self.history[p][i][j]);
+                }
+            }
+        }
+
+
+
+        _triggerLoad() {
+            const self = this;
+
+            if (self.reading) return;
+            if (self.pendingLoads.length==0) return;
+
+            const pageIdxs = Object.keys(self.pages);
+
+            const deletablePages = [];
+            for (let i=0; i<pageIdxs.length; i++) {
+                const page = self.pages[parseInt(pageIdxs[i])];
+                if ((page.dirty == false)&&(page.pendingOps==0)&&(!page.writing)&&(!page.loading)) deletablePages.push(parseInt(pageIdxs[i]));
+            }
+
+            let freePages = self.maxPagesLoaded - pageIdxs.length;
+
+            const ops = [];
+
+            // while pending loads and
+            //     the page is loaded or I can recover one.
+            while (
+                (self.pendingLoads.length>0) &&
+                (   (typeof self.pages[self.pendingLoads[0].page] != "undefined" )
+                  ||(  (freePages>0)
+                     ||(deletablePages.length>0)))) {
+                const load = self.pendingLoads.shift();
+                if (typeof self.pages[load.page] != "undefined") {
+                    self.pages[load.page].pendingOps ++;
+                    const idx = deletablePages.indexOf(load.page);
+                    if (idx>=0) deletablePages.splice(idx, 1);
+                    if (self.pages[load.page].loading) {
+                        self.pages[load.page].loading.push(load);
+                    } else {
+                        load.resolve();
+                    }
+                    self.__statusPage("After Load (cached): ", load.page);
+
+                } else {
+                    if (freePages) {
+                        freePages--;
+                    } else {
+                        const fp = deletablePages.shift();
+                        self.__statusPage("Before Unload: ", fp);
+                        self.avBuffs.unshift(self.pages[fp]);
+                        delete self.pages[fp];
+                        self.__statusPage("After Unload: ", fp);
+                    }
+
+                    if (load.page>=self.totalPages) {
+                        self.pages[load.page] = getNewPage();
+                        load.resolve();
+                        self.__statusPage("After Load (new): ", load.page);
+                    } else {
+                        self.reading = true;
+                        self.pages[load.page] = getNewPage();
+                        self.pages[load.page].loading = [load];
+                        ops.push(self.fd.read(self.pages[load.page].buff, 0, self.pageSize, load.page*self.pageSize).then((res)=> {
+                            self.pages[load.page].size = res.bytesRead;
+                            const loading = self.pages[load.page].loading;
+                            delete self.pages[load.page].loading;
+                            for (let i=0; i<loading.length; i++) {
+                                loading[i].resolve();
+                            }
+                            self.__statusPage("After Load (loaded): ", load.page);
+                            return res;
+                        }, (err) => {
+                            load.reject(err);
+                        }));
+                        self.__statusPage("After Load (loading): ", load.page);
+                    }
+                }
+            }
+            // if (ops.length>1) console.log(ops.length);
+
+            Promise.all(ops).then( () => {
+                self.reading = false;
+                if (self.pendingLoads.length>0) setImmediate(self._triggerLoad.bind(self));
+                self._tryClose();
+            });
+
+            function getNewPage() {
+                if (self.avBuffs.length>0) {
+                    const p = self.avBuffs.shift();
+                    p.dirty = false;
+                    p.pendingOps = 1;
+                    p.size =0;
+                    return p;
+                } else {
+                    return {
+                        dirty: false,
+                        buff: new Uint8Array(self.pageSize),
+                        pendingOps: 1,
+                        size: 0
+                    };
+                }
+            }
+
+        }
+
+
+        _triggerWrite() {
+            const self = this;
+            if (self.writing) return;
+
+            const pageIdxs = Object.keys(self.pages);
+
+            const ops = [];
+
+            for (let i=0; i<pageIdxs.length; i++) {
+                const page = self.pages[parseInt(pageIdxs[i])];
+                if (page.dirty) {
+                    page.dirty = false;
+                    page.writing = true;
+                    self.writing = true;
+                    ops.push( self.fd.write(page.buff, 0, page.size, parseInt(pageIdxs[i])*self.pageSize).then(() => {
+                        page.writing = false;
+                        return;
+                    }, (err) => {
+                        console.log("ERROR Writing: "+err);
+                        self.error = err;
+                        self._tryClose();
+                    }));
+                }
+            }
+
+            if (self.writing) {
+                Promise.all(ops).then( () => {
+                    self.writing = false;
+                    setImmediate(self._triggerWrite.bind(self));
+                    self._tryClose();
+                    if (self.pendingLoads.length>0) setImmediate(self._triggerLoad.bind(self));
+                });
+            }
+        }
+
+        _getDirtyPage() {
+            for (let p in this.pages) {
+                if (this.pages[p].dirty) return p;
+            }
+            return -1;
+        }
+
+        async write(buff, pos) {
+            if (buff.byteLength == 0) return;
+            const self = this;
+    /*
+            if (buff.byteLength > self.pageSize*self.maxPagesLoaded*0.8) {
+                const cacheSize = Math.floor(buff.byteLength * 1.1);
+                this.maxPagesLoaded = Math.floor( cacheSize / self.pageSize)+1;
+            }
+    */
+            if (typeof pos == "undefined") pos = self.pos;
+            self.pos = pos+buff.byteLength;
+            if (self.totalSize < pos + buff.byteLength) self.totalSize = pos + buff.byteLength;
+            if (self.pendingClose)
+                throw new Error("Writing a closing file");
+            const firstPage = Math.floor(pos / self.pageSize);
+            const lastPage = Math.floor((pos + buff.byteLength -1) / self.pageSize);
+
+            const pagePromises = [];
+            for (let i=firstPage; i<=lastPage; i++) pagePromises.push(self._loadPage(i));
+            self._triggerLoad();
+
+            let p = firstPage;
+            let o = pos % self.pageSize;
+            let r = buff.byteLength;
+            while (r>0) {
+                await pagePromises[p-firstPage];
+                const l = (o+r > self.pageSize) ? (self.pageSize -o) : r;
+                const srcView = buff.slice( buff.byteLength - r, buff.byteLength - r + l);
+                const dstView = new Uint8Array(self.pages[p].buff.buffer, o, l);
+                dstView.set(srcView);
+                self.pages[p].dirty = true;
+                self.pages[p].pendingOps --;
+                self.pages[p].size = Math.max(o+l, self.pages[p].size);
+                if (p>=self.totalPages) {
+                    self.totalPages = p+1;
+                }
+                r = r-l;
+                p ++;
+                o = 0;
+                if (!self.writing) setImmediate(self._triggerWrite.bind(self));
+            }
+        }
+
+        async read(len, pos) {
+            const self = this;
+            let buff = new Uint8Array(len);
+            await self.readToBuffer(buff, 0, len, pos);
+
+            return buff;
+        }
+
+        async readToBuffer(buffDst, offset, len, pos) {
+            if (len == 0) {
+                return;
+            }
+            const self = this;
+            if (len > self.pageSize*self.maxPagesLoaded*0.8) {
+                const cacheSize = Math.floor(len * 1.1);
+                this.maxPagesLoaded = Math.floor( cacheSize / self.pageSize)+1;
+            }
+            if (typeof pos == "undefined") pos = self.pos;
+            self.pos = pos+len;
+            if (self.pendingClose)
+                throw new Error("Reading a closing file");
+            const firstPage = Math.floor(pos / self.pageSize);
+            const lastPage = Math.floor((pos + len -1) / self.pageSize);
+
+            const pagePromises = [];
+            for (let i=firstPage; i<=lastPage; i++) pagePromises.push(self._loadPage(i));
+
+            self._triggerLoad();
+
+            let p = firstPage;
+            let o = pos % self.pageSize;
+            // Remaining bytes to read
+            let r = pos + len > self.totalSize ? len - (pos + len - self.totalSize): len;
+            while (r>0) {
+                await pagePromises[p - firstPage];
+                self.__statusPage("After Await (read): ", p);
+
+                // bytes to copy from this page
+                const l = (o+r > self.pageSize) ? (self.pageSize -o) : r;
+                const srcView = new Uint8Array(self.pages[p].buff.buffer, self.pages[p].buff.byteOffset + o, l);
+                buffDst.set(srcView, offset+len-r);
+                self.pages[p].pendingOps --;
+
+                self.__statusPage("After Op done: ", p);
+
+                r = r-l;
+                p ++;
+                o = 0;
+                if (self.pendingLoads.length>0) setImmediate(self._triggerLoad.bind(self));
+            }
+
+            this.pos = pos + len;
+
+        }
+
+
+        _tryClose() {
+            const self = this;
+            if (!self.pendingClose) return;
+            if (self.error) {
+                self.pendingCloseReject(self.error);
+            }
+            const p = self._getDirtyPage();
+            if ((p>=0) || (self.writing) || (self.reading) || (self.pendingLoads.length>0)) return;
+            self.pendingClose();
+        }
+
+        close() {
+            const self = this;
+            if (self.pendingClose)
+                throw new Error("Closing the file twice");
+            return new Promise((resolve, reject) => {
+                self.pendingClose = resolve;
+                self.pendingCloseReject = reject;
+                self._tryClose();
+            }).then(()=> {
+                self.fd.close();
+            }, (err) => {
+                self.fd.close();
+                throw (err);
+            });
+        }
+
+        async discard() {
+            const self = this;
+            await self.close();
+            await fs.promises.unlink(this.fileName);
+        }
+
+        async writeULE32(v, pos) {
+            const self = this;
+            const tmpBuff32 = new Uint8Array(4);
+            const tmpBuff32v = new DataView(tmpBuff32.buffer);
+
+            tmpBuff32v.setUint32(0, v, true);
+
+            await self.write(tmpBuff32, pos);
+        }
+
+        async writeUBE32(v, pos) {
+            const self = this;
+
+            const tmpBuff32 = new Uint8Array(4);
+            const tmpBuff32v = new DataView(tmpBuff32.buffer);
+
+            tmpBuff32v.setUint32(0, v, false);
+
+            await self.write(tmpBuff32, pos);
+        }
+
+
+        async writeULE64(v, pos) {
+            const self = this;
+
+            const tmpBuff64 = new Uint8Array(8);
+            const tmpBuff64v = new DataView(tmpBuff64.buffer);
+
+            tmpBuff64v.setUint32(0, v & 0xFFFFFFFF, true);
+            tmpBuff64v.setUint32(4, Math.floor(v / 0x100000000) , true);
+
+            await self.write(tmpBuff64, pos);
+        }
+
+        async readULE32(pos) {
+            const self = this;
+            const b = await self.read(4, pos);
+
+            const view = new Uint32Array(b.buffer);
+
+            return view[0];
+        }
+
+        async readUBE32(pos) {
+            const self = this;
+            const b = await self.read(4, pos);
+
+            const view = new DataView(b.buffer);
+
+            return view.getUint32(0, false);
+        }
+
+        async readULE64(pos) {
+            const self = this;
+            const b = await self.read(8, pos);
+
+            const view = new Uint32Array(b.buffer);
+
+            return view[1] * 0x100000000 + view[0];
+        }
+
+    }
+
+    function createNew$1(o) {
+        const initialSize = o.initialSize || 1<<20;
+        const fd = new MemFile();
+        fd.o = o;
+        fd.o.data = new Uint8Array(initialSize);
+        fd.allocSize = initialSize;
+        fd.totalSize = 0;
+        fd.readOnly = false;
+        fd.pos = 0;
+        return fd;
+    }
+
+    function readExisting$2(o) {
+        const fd = new MemFile();
+        fd.o = o;
+        fd.allocSize = o.data.byteLength;
+        fd.totalSize = o.data.byteLength;
+        fd.readOnly = true;
+        fd.pos = 0;
+        return fd;
+    }
+
+    const tmpBuff32$1 = new Uint8Array(4);
+    const tmpBuff32v$1 = new DataView(tmpBuff32$1.buffer);
+    const tmpBuff64$1 = new Uint8Array(8);
+    const tmpBuff64v$1 = new DataView(tmpBuff64$1.buffer);
+
+    class MemFile {
+
+        constructor() {
+            this.pageSize = 1 << 14;  // for compatibility
+        }
+
+        _resizeIfNeeded(newLen) {
+            if (newLen > this.allocSize) {
+                const newAllocSize = Math.max(
+                    this.allocSize + (1 << 20),
+                    Math.floor(this.allocSize * 1.1),
+                    newLen
+                );
+                const newData = new Uint8Array(newAllocSize);
+                newData.set(this.o.data);
+                this.o.data = newData;
+                this.allocSize = newAllocSize;
+            }
+        }
+
+        async write(buff, pos) {
+            const self =this;
+            if (typeof pos == "undefined") pos = self.pos;
+            if (this.readOnly) throw new Error("Writing a read only file");
+
+            this._resizeIfNeeded(pos + buff.byteLength);
+
+            this.o.data.set(buff.slice(), pos);
+
+            if (pos + buff.byteLength > this.totalSize) this.totalSize = pos + buff.byteLength;
+
+            this.pos = pos + buff.byteLength;
+        }
+
+        async readToBuffer(buffDest, offset, len, pos) {
+            const self = this;
+            if (typeof pos == "undefined") pos = self.pos;
+            if (this.readOnly) {
+                if (pos + len > this.totalSize) throw new Error("Reading out of bounds");
+            }
+            this._resizeIfNeeded(pos + len);
+
+            const buffSrc = new Uint8Array(this.o.data.buffer, this.o.data.byteOffset + pos, len);
+
+            buffDest.set(buffSrc, offset);
+
+            this.pos = pos + len;
+        }
+
+        async read(len, pos) {
+            const self = this;
+
+            const buff = new Uint8Array(len);
+            await self.readToBuffer(buff, 0, len, pos);
+
+            return buff;
+        }
+
+        close() {
+            if (this.o.data.byteLength != this.totalSize) {
+                this.o.data = this.o.data.slice(0, this.totalSize);
+            }
+        }
+
+        async discard() {
+        }
+
+
+        async writeULE32(v, pos) {
+            const self = this;
+
+            tmpBuff32v$1.setUint32(0, v, true);
+
+            await self.write(tmpBuff32$1, pos);
+        }
+
+        async writeUBE32(v, pos) {
+            const self = this;
+
+            tmpBuff32v$1.setUint32(0, v, false);
+
+            await self.write(tmpBuff32$1, pos);
+        }
+
+
+        async writeULE64(v, pos) {
+            const self = this;
+
+            tmpBuff64v$1.setUint32(0, v & 0xFFFFFFFF, true);
+            tmpBuff64v$1.setUint32(4, Math.floor(v / 0x100000000) , true);
+
+            await self.write(tmpBuff64$1, pos);
+        }
+
+
+        async readULE32(pos) {
+            const self = this;
+            const b = await self.read(4, pos);
+
+            const view = new Uint32Array(b.buffer);
+
+            return view[0];
+        }
+
+        async readUBE32(pos) {
+            const self = this;
+            const b = await self.read(4, pos);
+
+            const view = new DataView(b.buffer);
+
+            return view.getUint32(0, false);
+        }
+
+        async readULE64(pos) {
+            const self = this;
+            const b = await self.read(8, pos);
+
+            const view = new Uint32Array(b.buffer);
+
+            return view[1] * 0x100000000 + view[0];
+        }
+
+    }
+
+    const PAGE_SIZE = 1<<22;
+
+    function createNew(o) {
+        const initialSize = o.initialSize || 0;
+        const fd = new BigMemFile();
+        fd.o = o;
+        const nPages = initialSize ? Math.floor((initialSize - 1) / PAGE_SIZE)+1 : 0;
+        fd.o.data = [];
+        for (let i=0; i<nPages-1; i++) {
+            fd.o.data.push( new Uint8Array(PAGE_SIZE));
+        }
+        if (nPages) fd.o.data.push( new Uint8Array(initialSize - PAGE_SIZE*(nPages-1)));
+        fd.totalSize = 0;
+        fd.readOnly = false;
+        fd.pos = 0;
+        return fd;
+    }
+
+    function readExisting$1(o) {
+        const fd = new BigMemFile();
+        fd.o = o;
+        fd.totalSize = (o.data.length-1)* PAGE_SIZE + o.data[o.data.length-1].byteLength;
+        fd.readOnly = true;
+        fd.pos = 0;
+        return fd;
+    }
+
+    const tmpBuff32 = new Uint8Array(4);
+    const tmpBuff32v = new DataView(tmpBuff32.buffer);
+    const tmpBuff64 = new Uint8Array(8);
+    const tmpBuff64v = new DataView(tmpBuff64.buffer);
+
+    class BigMemFile {
+
+        constructor() {
+            this.pageSize = 1 << 14;  // for compatibility
+        }
+
+        _resizeIfNeeded(newLen) {
+
+            if (newLen <= this.totalSize) return;
+
+            if (this.readOnly) throw new Error("Reading out of file bounds");
+
+            const nPages = Math.floor((newLen - 1) / PAGE_SIZE)+1;
+            for (let i= Math.max(this.o.data.length-1, 0); i<nPages; i++) {
+                const newSize = i<nPages-1 ? PAGE_SIZE : newLen - (nPages-1)*PAGE_SIZE;
+                const p = new Uint8Array(newSize);
+                if (i == this.o.data.length-1) p.set(this.o.data[i]);
+                this.o.data[i] = p;
+            }
+            this.totalSize = newLen;
+        }
+
+        async write(buff, pos) {
+            const self =this;
+            if (typeof pos == "undefined") pos = self.pos;
+            if (this.readOnly) throw new Error("Writing a read only file");
+
+            this._resizeIfNeeded(pos + buff.byteLength);
+
+            const firstPage = Math.floor(pos / PAGE_SIZE);
+
+            let p = firstPage;
+            let o = pos % PAGE_SIZE;
+            let r = buff.byteLength;
+            while (r>0) {
+                const l = (o+r > PAGE_SIZE) ? (PAGE_SIZE -o) : r;
+                const srcView = buff.slice(buff.byteLength - r, buff.byteLength - r + l);
+                const dstView = new Uint8Array(self.o.data[p].buffer, o, l);
+                dstView.set(srcView);
+                r = r-l;
+                p ++;
+                o = 0;
+            }
+
+            this.pos = pos + buff.byteLength;
+        }
+
+        async readToBuffer(buffDst, offset, len, pos) {
+            const self = this;
+            if (typeof pos == "undefined") pos = self.pos;
+            if (this.readOnly) {
+                if (pos + len > this.totalSize) throw new Error("Reading out of bounds");
+            }
+            this._resizeIfNeeded(pos + len);
+
+            const firstPage = Math.floor(pos / PAGE_SIZE);
+
+            let p = firstPage;
+            let o = pos % PAGE_SIZE;
+            // Remaining bytes to read
+            let r = len;
+            while (r>0) {
+                // bytes to copy from this page
+                const l = (o+r > PAGE_SIZE) ? (PAGE_SIZE -o) : r;
+                const srcView = new Uint8Array(self.o.data[p].buffer, o, l);
+                buffDst.set(srcView, offset+len-r);
+                r = r-l;
+                p ++;
+                o = 0;
+            }
+
+            this.pos = pos + len;
+        }
+
+        async read(len, pos) {
+            const self = this;
+            const buff = new Uint8Array(len);
+
+            await self.readToBuffer(buff, 0, len, pos);
+
+            return buff;
+        }
+
+        close() {
+        }
+
+        async discard() {
+        }
+
+
+        async writeULE32(v, pos) {
+            const self = this;
+
+            tmpBuff32v.setUint32(0, v, true);
+
+            await self.write(tmpBuff32, pos);
+        }
+
+        async writeUBE32(v, pos) {
+            const self = this;
+
+            tmpBuff32v.setUint32(0, v, false);
+
+            await self.write(tmpBuff32, pos);
+        }
+
+
+        async writeULE64(v, pos) {
+            const self = this;
+
+            tmpBuff64v.setUint32(0, v & 0xFFFFFFFF, true);
+            tmpBuff64v.setUint32(4, Math.floor(v / 0x100000000) , true);
+
+            await self.write(tmpBuff64, pos);
+        }
+
+
+        async readULE32(pos) {
+            const self = this;
+            const b = await self.read(4, pos);
+
+            const view = new Uint32Array(b.buffer);
+
+            return view[0];
+        }
+
+        async readUBE32(pos) {
+            const self = this;
+            const b = await self.read(4, pos);
+
+            const view = new DataView(b.buffer);
+
+            return view.getUint32(0, false);
+        }
+
+        async readULE64(pos) {
+            const self = this;
+            const b = await self.read(8, pos);
+
+            const view = new Uint32Array(b.buffer);
+
+            return view[1] * 0x100000000 + view[0];
+        }
+
+    }
+
+    /* global fetch */
+
+    const DEFAULT_CACHE_SIZE = (1 << 16);
+    const DEFAULT_PAGE_SIZE = (1 << 13);
+
+
+    async function createOverride(o, b, c) {
+        if (typeof o === "string") {
+            o = {
+                type: "file",
+                fileName: o,
+                cacheSize: b || DEFAULT_CACHE_SIZE,
+                pageSize: c || DEFAULT_PAGE_SIZE
+            };
+        }
+        if (o.type == "file") {
+            return await open(o.fileName, "w+", o.cacheSize, o.pageSize);
+        } else if (o.type == "mem") {
+            return createNew$1(o);
+        } else if (o.type == "bigMem") {
+            return createNew(o);
+        } else {
+            throw new Error("Invalid FastFile type: "+o.type);
+        }
+    }
+
+    async function readExisting(o, b, c) {
+        if (o instanceof Uint8Array) {
+            o = {
+                type: "mem",
+                data: o
+            };
+        }
+        {
+            if (typeof o === "string") {
+                const buff = await fetch(o).then( function(res) {
+                    return res.arrayBuffer();
+                }).then(function (ab) {
+                    return new Uint8Array(ab);
+                });
+                o = {
+                    type: "mem",
+                    data: buff
+                };
+            }
+        }
+        if (o.type == "file") {
+            return await open(o.fileName, "r", o.cacheSize, o.pageSize);
+        } else if (o.type == "mem") {
+            return await readExisting$2(o);
+        } else if (o.type == "bigMem") {
+            return await readExisting$1(o);
+        } else {
+            throw new Error("Invalid FastFile type: "+o.type);
+        }
+    }
+
+    async function readBinFile(fileName, type, maxVersion, cacheSize, pageSize) {
+
+        const fd = await readExisting(fileName);
+
+        const b = await fd.read(4);
+        let readedType = "";
+        for (let i=0; i<4; i++) readedType += String.fromCharCode(b[i]);
+
+        if (readedType != type) throw new Error(fileName + ": Invalid File format");
+
+        let v = await fd.readULE32();
+
+        if (v>maxVersion) throw new Error("Version not supported");
+
+        const nSections = await fd.readULE32();
+
+        // Scan sections
+        let sections = [];
+        for (let i=0; i<nSections; i++) {
+            let ht = await fd.readULE32();
+            let hl = await fd.readULE64();
+            if (typeof sections[ht] == "undefined") sections[ht] = [];
+            sections[ht].push({
+                p: fd.pos,
+                size: hl
+            });
+            fd.pos += hl;
+        }
+
+        return {fd, sections};
+    }
+
+    async function createBinFile(fileName, type, version, nSections, cacheSize, pageSize) {
+
+        const fd = await createOverride(fileName, cacheSize, pageSize);
+
+        const buff = new Uint8Array(4);
+        for (let i=0; i<4; i++) buff[i] = type.charCodeAt(i);
+        await fd.write(buff, 0); // Magic "r1cs"
+
+        await fd.writeULE32(version); // Version
+        await fd.writeULE32(nSections); // Number of Sections
+
+        return fd;
+    }
+
+    async function startWriteSection(fd, idSection) {
+        if (typeof fd.writingSection !== "undefined") throw new Error("Already writing a section");
+        await fd.writeULE32(idSection); // Header type
+        fd.writingSection = {
+            pSectionSize: fd.pos
+        };
+        await fd.writeULE64(0); // Temporally set to 0 length
+    }
+
+    async function endWriteSection(fd) {
+        if (typeof fd.writingSection === "undefined") throw new Error("Not writing a section");
+
+        const sectionSize = fd.pos - fd.writingSection.pSectionSize - 8;
+        const oldPos = fd.pos;
+        fd.pos = fd.writingSection.pSectionSize;
+        await fd.writeULE64(sectionSize);
+        fd.pos = oldPos;
+        delete fd.writingSection;
+    }
+
+    async function startReadUniqueSection(fd, sections, idSection) {
+        if (typeof fd.readingSection !== "undefined") throw new Error("Already reading a section");
+        if (!sections[idSection])  throw new Error(fd.fileName + ": Missing section "+ idSection );
+        if (sections[idSection].length>1) throw new Error(fd.fileName +": Section Duplicated " +idSection);
+
+        fd.pos = sections[idSection][0].p;
+
+        fd.readingSection = sections[idSection][0];
+    }
+
+    async function endReadSection(fd, noCheck) {
+        if (typeof fd.readingSection === "undefined") throw new Error("Not reading a section");
+        if (!noCheck) {
+            if (fd.pos-fd.readingSection.p !=  fd.readingSection.size) throw new Error("Invalid section size reading");
+        }
+        delete fd.readingSection;
+    }
+
+    async function writeBigInt(fd, n, n8, pos) {
+        const buff = new Uint8Array(n8);
+        Scalar.toRprLE(buff, 0, n, n8);
+        await fd.write(buff, pos);
+    }
+
+    async function readBigInt(fd, n8, pos) {
+        const buff = await fd.read(n8, pos);
+        return Scalar.fromRprLE(buff, 0, n8);
+    }
+
+    async function copySection(fdFrom, sections, fdTo, sectionId, size) {
+        if (typeof size === "undefined") {
+            size = sections[sectionId][0].size;
+        }
+        const chunkSize = fdFrom.pageSize;
+        await startReadUniqueSection(fdFrom, sections, sectionId);
+        await startWriteSection(fdTo, sectionId);
+        for (let p=0; p<size; p+=chunkSize) {
+            const l = Math.min(size -p, chunkSize);
+            const buff = await fdFrom.read(l);
+            await fdTo.write(buff);
+        }
+        await endWriteSection(fdTo);
+        await endReadSection(fdFrom, size != sections[sectionId][0].size);
+
+    }
+
+    async function readSection(fd, sections, idSection, offset, length) {
+
+        offset = (typeof offset === "undefined") ? 0 : offset;
+        length = (typeof length === "undefined") ? sections[idSection][0].size - offset : length;
+
+        if (offset + length > sections[idSection][0].size) {
+            throw new Error("Reading out of the range of the section");
+        }
+
+        let buff;
+        if (length < (1 << 30) ) {
+            buff = new Uint8Array(length);
+        } else {
+            buff = new BigBuffer(length);
+        }
+
+        await fd.readToBuffer(buff, 0, length, sections[idSection][0].p + offset);
+        return buff;
+    }
+
+    /*!
+        localForage -- Offline Storage, Improved
+        Version 1.10.0
+        https://localforage.github.io/localForage
+        (c) 2013-2017 Mozilla, Apache License 2.0
+    */
+
+    var localforage = createCommonjsModule(function (module, exports) {
+    (function(f){{module.exports=f();}})(function(){return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof commonjsRequire=="function"&&commonjsRequire;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw (f.code="MODULE_NOT_FOUND", f)}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r);}return n[o].exports}var i=typeof commonjsRequire=="function"&&commonjsRequire;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(_dereq_,module,exports){
+    (function (global){
+    var Mutation = global.MutationObserver || global.WebKitMutationObserver;
+
+    var scheduleDrain;
+
+    {
+      if (Mutation) {
+        var called = 0;
+        var observer = new Mutation(nextTick);
+        var element = global.document.createTextNode('');
+        observer.observe(element, {
+          characterData: true
+        });
+        scheduleDrain = function () {
+          element.data = (called = ++called % 2);
+        };
+      } else if (!global.setImmediate && typeof global.MessageChannel !== 'undefined') {
+        var channel = new global.MessageChannel();
+        channel.port1.onmessage = nextTick;
+        scheduleDrain = function () {
+          channel.port2.postMessage(0);
+        };
+      } else if ('document' in global && 'onreadystatechange' in global.document.createElement('script')) {
+        scheduleDrain = function () {
+
+          // Create a <script> element; its readystatechange event will be fired asynchronously once it is inserted
+          // into the document. Do so, thus queuing up the task. Remember to clean up once it's been called.
+          var scriptEl = global.document.createElement('script');
+          scriptEl.onreadystatechange = function () {
+            nextTick();
+
+            scriptEl.onreadystatechange = null;
+            scriptEl.parentNode.removeChild(scriptEl);
+            scriptEl = null;
+          };
+          global.document.documentElement.appendChild(scriptEl);
+        };
+      } else {
+        scheduleDrain = function () {
+          setTimeout(nextTick, 0);
+        };
+      }
+    }
+
+    var draining;
+    var queue = [];
+    //named nextTick for less confusing stack traces
+    function nextTick() {
+      draining = true;
+      var i, oldQueue;
+      var len = queue.length;
+      while (len) {
+        oldQueue = queue;
+        queue = [];
+        i = -1;
+        while (++i < len) {
+          oldQueue[i]();
+        }
+        len = queue.length;
+      }
+      draining = false;
+    }
+
+    module.exports = immediate;
+    function immediate(task) {
+      if (queue.push(task) === 1 && !draining) {
+        scheduleDrain();
+      }
+    }
+
+    }).call(this,typeof commonjsGlobal !== "undefined" ? commonjsGlobal : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {});
+    },{}],2:[function(_dereq_,module,exports){
+    var immediate = _dereq_(1);
+
+    /* istanbul ignore next */
+    function INTERNAL() {}
+
+    var handlers = {};
+
+    var REJECTED = ['REJECTED'];
+    var FULFILLED = ['FULFILLED'];
+    var PENDING = ['PENDING'];
+
+    module.exports = Promise;
+
+    function Promise(resolver) {
+      if (typeof resolver !== 'function') {
+        throw new TypeError('resolver must be a function');
+      }
+      this.state = PENDING;
+      this.queue = [];
+      this.outcome = void 0;
+      if (resolver !== INTERNAL) {
+        safelyResolveThenable(this, resolver);
+      }
+    }
+
+    Promise.prototype["catch"] = function (onRejected) {
+      return this.then(null, onRejected);
+    };
+    Promise.prototype.then = function (onFulfilled, onRejected) {
+      if (typeof onFulfilled !== 'function' && this.state === FULFILLED ||
+        typeof onRejected !== 'function' && this.state === REJECTED) {
+        return this;
+      }
+      var promise = new this.constructor(INTERNAL);
+      if (this.state !== PENDING) {
+        var resolver = this.state === FULFILLED ? onFulfilled : onRejected;
+        unwrap(promise, resolver, this.outcome);
+      } else {
+        this.queue.push(new QueueItem(promise, onFulfilled, onRejected));
+      }
+
+      return promise;
+    };
+    function QueueItem(promise, onFulfilled, onRejected) {
+      this.promise = promise;
+      if (typeof onFulfilled === 'function') {
+        this.onFulfilled = onFulfilled;
+        this.callFulfilled = this.otherCallFulfilled;
+      }
+      if (typeof onRejected === 'function') {
+        this.onRejected = onRejected;
+        this.callRejected = this.otherCallRejected;
+      }
+    }
+    QueueItem.prototype.callFulfilled = function (value) {
+      handlers.resolve(this.promise, value);
+    };
+    QueueItem.prototype.otherCallFulfilled = function (value) {
+      unwrap(this.promise, this.onFulfilled, value);
+    };
+    QueueItem.prototype.callRejected = function (value) {
+      handlers.reject(this.promise, value);
+    };
+    QueueItem.prototype.otherCallRejected = function (value) {
+      unwrap(this.promise, this.onRejected, value);
+    };
+
+    function unwrap(promise, func, value) {
+      immediate(function () {
+        var returnValue;
+        try {
+          returnValue = func(value);
+        } catch (e) {
+          return handlers.reject(promise, e);
+        }
+        if (returnValue === promise) {
+          handlers.reject(promise, new TypeError('Cannot resolve promise with itself'));
+        } else {
+          handlers.resolve(promise, returnValue);
+        }
+      });
+    }
+
+    handlers.resolve = function (self, value) {
+      var result = tryCatch(getThen, value);
+      if (result.status === 'error') {
+        return handlers.reject(self, result.value);
+      }
+      var thenable = result.value;
+
+      if (thenable) {
+        safelyResolveThenable(self, thenable);
+      } else {
+        self.state = FULFILLED;
+        self.outcome = value;
+        var i = -1;
+        var len = self.queue.length;
+        while (++i < len) {
+          self.queue[i].callFulfilled(value);
+        }
+      }
+      return self;
+    };
+    handlers.reject = function (self, error) {
+      self.state = REJECTED;
+      self.outcome = error;
+      var i = -1;
+      var len = self.queue.length;
+      while (++i < len) {
+        self.queue[i].callRejected(error);
+      }
+      return self;
+    };
+
+    function getThen(obj) {
+      // Make sure we only access the accessor once as required by the spec
+      var then = obj && obj.then;
+      if (obj && (typeof obj === 'object' || typeof obj === 'function') && typeof then === 'function') {
+        return function appyThen() {
+          then.apply(obj, arguments);
+        };
+      }
+    }
+
+    function safelyResolveThenable(self, thenable) {
+      // Either fulfill, reject or reject with error
+      var called = false;
+      function onError(value) {
+        if (called) {
+          return;
+        }
+        called = true;
+        handlers.reject(self, value);
+      }
+
+      function onSuccess(value) {
+        if (called) {
+          return;
+        }
+        called = true;
+        handlers.resolve(self, value);
+      }
+
+      function tryToUnwrap() {
+        thenable(onSuccess, onError);
+      }
+
+      var result = tryCatch(tryToUnwrap);
+      if (result.status === 'error') {
+        onError(result.value);
+      }
+    }
+
+    function tryCatch(func, value) {
+      var out = {};
+      try {
+        out.value = func(value);
+        out.status = 'success';
+      } catch (e) {
+        out.status = 'error';
+        out.value = e;
+      }
+      return out;
+    }
+
+    Promise.resolve = resolve;
+    function resolve(value) {
+      if (value instanceof this) {
+        return value;
+      }
+      return handlers.resolve(new this(INTERNAL), value);
+    }
+
+    Promise.reject = reject;
+    function reject(reason) {
+      var promise = new this(INTERNAL);
+      return handlers.reject(promise, reason);
+    }
+
+    Promise.all = all;
+    function all(iterable) {
+      var self = this;
+      if (Object.prototype.toString.call(iterable) !== '[object Array]') {
+        return this.reject(new TypeError('must be an array'));
+      }
+
+      var len = iterable.length;
+      var called = false;
+      if (!len) {
+        return this.resolve([]);
+      }
+
+      var values = new Array(len);
+      var resolved = 0;
+      var i = -1;
+      var promise = new this(INTERNAL);
+
+      while (++i < len) {
+        allResolver(iterable[i], i);
+      }
+      return promise;
+      function allResolver(value, i) {
+        self.resolve(value).then(resolveFromAll, function (error) {
+          if (!called) {
+            called = true;
+            handlers.reject(promise, error);
+          }
+        });

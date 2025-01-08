@@ -1,0 +1,2500 @@
+    const contributionPreviousHash = await fdResponse.read(64);
+
+    if (misc.hashIsEqual(noHash,lastChallengeHash)) {
+        lastChallengeHash = contributionPreviousHash;
+        contributions[contributions.length-1].nextChallenge = lastChallengeHash;
+    }
+
+    if(!misc.hashIsEqual(contributionPreviousHash,lastChallengeHash))
+        throw new Error("Wrong contribution. this contribution is not based on the previus hash");
+
+    const hasherResponse = new Blake2b(64);
+    hasherResponse.update(contributionPreviousHash);
+
+    const startSections = [];
+    let res;
+    res = await processSection(fdResponse, fdNew, "G1", 2, (2 ** power) * 2 -1, [1], "tauG1");
+    currentContribution.tauG1 = res[0];
+    res = await processSection(fdResponse, fdNew, "G2", 3, (2 ** power)       , [1], "tauG2");
+    currentContribution.tauG2 = res[0];
+    res = await processSection(fdResponse, fdNew, "G1", 4, (2 ** power)       , [0], "alphaG1");
+    currentContribution.alphaG1 = res[0];
+    res = await processSection(fdResponse, fdNew, "G1", 5, (2 ** power)       , [0], "betaG1");
+    currentContribution.betaG1 = res[0];
+    res = await processSection(fdResponse, fdNew, "G2", 6, 1                  , [0], "betaG2");
+    currentContribution.betaG2 = res[0];
+
+    currentContribution.partialHash = hasherResponse.getPartialHash();
+
+
+    const buffKey = await fdResponse.read(curve.F1.n8*2*6+curve.F2.n8*2*3);
+
+    currentContribution.key = utils.fromPtauPubKeyRpr(buffKey, 0, curve, false);
+
+    hasherResponse.update(new Uint8Array(buffKey));
+    const hashResponse = hasherResponse.digest();
+
+    if (logger) logger.info(misc.formatHash(hashResponse, "Contribution Response Hash imported: "));
+
+    if (importPoints) {
+        const nextChallengeHasher = new Blake2b(64);
+        nextChallengeHasher.update(hashResponse);
+
+        await hashSection(nextChallengeHasher, fdNew, "G1", 2, (2 ** power) * 2 -1, "tauG1", logger);
+        await hashSection(nextChallengeHasher, fdNew, "G2", 3, (2 ** power)       , "tauG2", logger);
+        await hashSection(nextChallengeHasher, fdNew, "G1", 4, (2 ** power)       , "alphaTauG1", logger);
+        await hashSection(nextChallengeHasher, fdNew, "G1", 5, (2 ** power)       , "betaTauG1", logger);
+        await hashSection(nextChallengeHasher, fdNew, "G2", 6, 1                  , "betaG2", logger);
+
+        currentContribution.nextChallenge = nextChallengeHasher.digest();
+
+        if (logger) logger.info(misc.formatHash(currentContribution.nextChallenge, "Next Challenge Hash: "));
+    } else {
+        currentContribution.nextChallenge = noHash;
+    }
+
+    contributions.push(currentContribution);
+
+    await utils.writeContributions(fdNew, curve, contributions);
+
+    await fdResponse.close();
+    await fdNew.close();
+    await fdOld.close();
+
+    return currentContribution.nextChallenge;
+
+    async function processSection(fdFrom, fdTo, groupName, sectionId, nPoints, singularPointIndexes, sectionName) {
+        if (importPoints) {
+            return await processSectionImportPoints(fdFrom, fdTo, groupName, sectionId, nPoints, singularPointIndexes, sectionName);
+        } else {
+            return await processSectionNoImportPoints(fdFrom, fdTo, groupName, sectionId, nPoints, singularPointIndexes, sectionName);
+        }
+    }
+
+    async function processSectionImportPoints(fdFrom, fdTo, groupName, sectionId, nPoints, singularPointIndexes, sectionName) {
+
+        const G = curve[groupName];
+        const scG = G.F.n8;
+        const sG = G.F.n8*2;
+
+        const singularPoints = [];
+
+        await binFileUtils.startWriteSection(fdTo, sectionId);
+        const nPointsChunk = Math.floor((1<<24)/sG);
+
+        startSections[sectionId] = fdTo.pos;
+
+        for (let i=0; i< nPoints; i += nPointsChunk) {
+            if (logger) logger.debug(`Importing ${sectionName}: ${i}/${nPoints}`);
+            const n = Math.min(nPoints-i, nPointsChunk);
+
+            const buffC = await fdFrom.read(n * scG);
+            hasherResponse.update(buffC);
+
+            const buffLEM = await G.batchCtoLEM(buffC);
+
+            await fdTo.write(buffLEM);
+            for (let j=0; j<singularPointIndexes.length; j++) {
+                const sp = singularPointIndexes[j];
+                if ((sp >=i) && (sp < i+n)) {
+                    const P = G.fromRprLEM(buffLEM, (sp-i)*sG);
+                    singularPoints.push(P);
+                }
+            }
+        }
+
+        await binFileUtils.endWriteSection(fdTo);
+
+        return singularPoints;
+    }
+
+
+    async function processSectionNoImportPoints(fdFrom, fdTo, groupName, sectionId, nPoints, singularPointIndexes, sectionName) {
+
+        const G = curve[groupName];
+        const scG = G.F.n8;
+
+        const singularPoints = [];
+
+        const nPointsChunk = Math.floor((1<<24)/scG);
+
+        for (let i=0; i< nPoints; i += nPointsChunk) {
+            if (logger) logger.debug(`Importing ${sectionName}: ${i}/${nPoints}`);
+            const n = Math.min(nPoints-i, nPointsChunk);
+
+            const buffC = await fdFrom.read(n * scG);
+            hasherResponse.update(buffC);
+
+            for (let j=0; j<singularPointIndexes.length; j++) {
+                const sp = singularPointIndexes[j];
+                if ((sp >=i) && (sp < i+n)) {
+                    const P = G.fromRprCompressed(buffC, (sp-i)*scG);
+                    singularPoints.push(P);
+                }
+            }
+        }
+
+        return singularPoints;
+    }
+
+
+    async function hashSection(nextChallengeHasher, fdTo, groupName, sectionId, nPoints, sectionName, logger) {
+
+        const G = curve[groupName];
+        const sG = G.F.n8*2;
+        const nPointsChunk = Math.floor((1<<24)/sG);
+
+        const oldPos = fdTo.pos;
+        fdTo.pos = startSections[sectionId];
+
+        for (let i=0; i< nPoints; i += nPointsChunk) {
+            if (logger) logger.debug(`Hashing ${sectionName}: ${i}/${nPoints}`);
+            const n = Math.min(nPoints-i, nPointsChunk);
+
+            const buffLEM = await fdTo.read(n * sG);
+
+            const buffU = await G.batchLEMtoU(buffLEM);
+
+            nextChallengeHasher.update(buffU);
+        }
+
+        fdTo.pos = oldPos;
+    }
+
+}
+
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/powersoftau_new.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+/*
+Header(1)
+    n8
+    prime
+    power
+tauG1(2)
+    {(2 ** power)*2-1} [
+        G1, tau*G1, tau^2 * G1, ....
+    ]
+tauG2(3)
+    {2 ** power}[
+        G2, tau*G2, tau^2 * G2, ...
+    ]
+alphaTauG1(4)
+    {2 ** power}[
+        alpha*G1, alpha*tau*G1, alpha*tau^2*G1,....
+    ]
+betaTauG1(5)
+    {2 ** power} []
+        beta*G1, beta*tau*G1, beta*tau^2*G1, ....
+    ]
+betaG2(6)
+    {1}[
+        beta*G2
+    ]
+contributions(7)
+    NContributions
+    {NContributions}[
+        tau*G1
+        tau*G2
+        alpha*G1
+        beta*G1
+        beta*G2
+        pubKey
+            tau_g1s
+            tau_g1sx
+            tau_g2spx
+            alpha_g1s
+            alpha_g1sx
+            alpha_g1spx
+            beta_g1s
+            beta_g1sx
+            beta_g1spx
+        partialHash (216 bytes) See https://github.com/mafintosh/blake2b-wasm/blob/23bee06945806309977af802bc374727542617c7/blake2b.wat#L9
+        hashNewChallenge
+    ]
+ */
+
+import * as ptauUtils from "./powersoftau_utils.js";
+import * as binFileUtils from "@iden3/binfileutils";
+import Blake2b from "blake2b-wasm";
+import * as misc from "./misc.js";
+
+export default async function newAccumulator(curve, power, fileName, logger) {
+
+    await Blake2b.ready();
+
+    const fd = await binFileUtils.createBinFile(fileName, "ptau", 1, 7);
+
+    await ptauUtils.writePTauHeader(fd, curve, power, 0);
+
+    const buffG1 = curve.G1.oneAffine;
+    const buffG2 = curve.G2.oneAffine;
+
+    // Write tauG1
+    ///////////
+    await binFileUtils.startWriteSection(fd, 2);
+    const nTauG1 = (2 ** power) * 2 -1;
+    for (let i=0; i< nTauG1; i++) {
+        await fd.write(buffG1);
+        if ((logger)&&((i%100000) == 0)&&i) logger.log("tauG1: " + i);
+    }
+    await binFileUtils.endWriteSection(fd);
+
+    // Write tauG2
+    ///////////
+    await binFileUtils.startWriteSection(fd, 3);
+    const nTauG2 = (2 ** power);
+    for (let i=0; i< nTauG2; i++) {
+        await fd.write(buffG2);
+        if ((logger)&&((i%100000) == 0)&&i) logger.log("tauG2: " + i);
+    }
+    await binFileUtils.endWriteSection(fd);
+
+    // Write alphaTauG1
+    ///////////
+    await binFileUtils.startWriteSection(fd, 4);
+    const nAlfaTauG1 = (2 ** power);
+    for (let i=0; i< nAlfaTauG1; i++) {
+        await fd.write(buffG1);
+        if ((logger)&&((i%100000) == 0)&&i) logger.log("alphaTauG1: " + i);
+    }
+    await binFileUtils.endWriteSection(fd);
+
+    // Write betaTauG1
+    ///////////
+    await binFileUtils.startWriteSection(fd, 5);
+    const nBetaTauG1 = (2 ** power);
+    for (let i=0; i< nBetaTauG1; i++) {
+        await fd.write(buffG1);
+        if ((logger)&&((i%100000) == 0)&&i) logger.log("betaTauG1: " + i);
+    }
+    await binFileUtils.endWriteSection(fd);
+
+    // Write betaG2
+    ///////////
+    await binFileUtils.startWriteSection(fd, 6);
+    await fd.write(buffG2);
+    await binFileUtils.endWriteSection(fd);
+
+    // Contributions
+    ///////////
+    await binFileUtils.startWriteSection(fd, 7);
+    await fd.writeULE32(0); // 0 Contributions
+    await binFileUtils.endWriteSection(fd);
+
+    await fd.close();
+
+    const firstChallengeHash = ptauUtils.calculateFirstChallengeHash(curve, power, logger);
+
+    if (logger) logger.debug(misc.formatHash(Blake2b(64).digest(), "Blank Contribution Hash:"));
+
+    if (logger) logger.info(misc.formatHash(firstChallengeHash, "First Contribution Hash:"));
+
+    return firstChallengeHash;
+
+}
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/powersoftau_preparephase2.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+import * as binFileUtils from "@iden3/binfileutils";
+import * as utils from "./powersoftau_utils.js";
+import {BigBuffer} from "ffjavascript";
+
+export default async function preparePhase2(oldPtauFilename, newPTauFilename, logger) {
+
+    const {fd: fdOld, sections} = await binFileUtils.readBinFile(oldPtauFilename, "ptau", 1);
+    const {curve, power} = await utils.readPTauHeader(fdOld, sections);
+
+    const fdNew = await binFileUtils.createBinFile(newPTauFilename, "ptau", 1, 11);
+    await utils.writePTauHeader(fdNew, curve, power);
+
+    await binFileUtils.copySection(fdOld, sections, fdNew, 2);
+    await binFileUtils.copySection(fdOld, sections, fdNew, 3);
+    await binFileUtils.copySection(fdOld, sections, fdNew, 4);
+    await binFileUtils.copySection(fdOld, sections, fdNew, 5);
+    await binFileUtils.copySection(fdOld, sections, fdNew, 6);
+    await binFileUtils.copySection(fdOld, sections, fdNew, 7);
+
+    await processSection(2, 12, "G1", "tauG1" );
+    await processSection(3, 13, "G2", "tauG2" );
+    await processSection(4, 14, "G1", "alphaTauG1" );
+    await processSection(5, 15, "G1", "betaTauG1" );
+
+    await fdOld.close();
+    await fdNew.close();
+
+    // await fs.promises.unlink(newPTauFilename+ ".tmp");
+
+    return;
+
+    async function processSection(oldSectionId, newSectionId, Gstr, sectionName) {
+        if (logger) logger.debug("Starting section: "+sectionName);
+
+        await binFileUtils.startWriteSection(fdNew, newSectionId);
+
+        for (let p=0; p<=power; p++) {
+            await processSectionPower(p);
+        }
+
+        if (oldSectionId == 2) {
+            await processSectionPower(power+1);
+        }
+
+        await binFileUtils.endWriteSection(fdNew);
+
+
+        async function processSectionPower(p) {
+            const nPoints = 2 ** p;
+            const G = curve[Gstr];
+            const Fr = curve.Fr;
+            const sGin = G.F.n8*2;
+            const sGmid = G.F.n8*3;
+
+            let buff;
+            buff = new BigBuffer(nPoints*sGin);
+
+            await binFileUtils.startReadUniqueSection(fdOld, sections, oldSectionId);
+            if ((oldSectionId == 2)&&(p==power+1)) {
+                await fdOld.readToBuffer(buff, 0,(nPoints-1)*sGin );
+                buff.set(curve.G1.zeroAffine, (nPoints-1)*sGin );
+            } else {
+                await fdOld.readToBuffer(buff, 0,nPoints*sGin );
+            }
+            await binFileUtils.endReadSection(fdOld, true);
+
+
+            buff = await G.lagrangeEvaluations(buff, "affine", "affine", logger, sectionName);
+            await fdNew.write(buff);
+
+/*
+            if (p <= curve.Fr.s) {
+                buff = await G.ifft(buff, "affine", "affine", logger, sectionName);
+                await fdNew.write(buff);
+            } else if (p == curve.Fr.s+1) {
+                const smallM = 1<<curve.Fr.s;
+                let t0 = new BigBuffer( smallM * sGmid );
+                let t1 = new BigBuffer( smallM * sGmid );
+
+                const shift_to_small_m = Fr.exp(Fr.shift, smallM);
+                const one_over_denom = Fr.inv(Fr.sub(shift_to_small_m, Fr.one));
+
+                let sInvAcc = Fr.one;
+                for (let i=0; i<smallM; i++) {
+                    const ti =  buff.slice(i*sGin, (i+1)*sGin);
+                    const tmi = buff.slice((i+smallM)*sGin, (i+smallM+1)*sGin);
+
+                    t0.set(
+                        G.timesFr(
+                            G.sub(
+                                G.timesFr(ti , shift_to_small_m),
+                                tmi
+                            ),
+                            one_over_denom
+                        ),
+                        i*sGmid
+                    );
+                    t1.set(
+                        G.timesFr(
+                            G.sub( tmi, ti),
+                            Fr.mul(sInvAcc, one_over_denom)
+                        ),
+                        i*sGmid
+                    );
+
+
+                    sInvAcc = Fr.mul(sInvAcc, Fr.shiftInv);
+                }
+                t0 = await G.ifft(t0, "jacobian", "affine", logger, sectionName + " t0");
+                await fdNew.write(t0);
+                t0 = null;
+                t1 = await G.ifft(t1, "jacobian", "affine", logger, sectionName + " t0");
+                await fdNew.write(t1);
+
+            } else {
+                if (logger) logger.error("Power too big");
+                throw new Error("Power to big");
+            }
+*/
+        }
+    }
+}
+
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/powersoftau_truncate.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+import * as binFileUtils from "@iden3/binfileutils";
+import * as utils from "./powersoftau_utils.js";
+
+export default async function truncate(ptauFilename, template, logger) {
+
+    const {fd: fdOld, sections} = await binFileUtils.readBinFile(ptauFilename, "ptau", 1);
+    const {curve, power, ceremonyPower} = await utils.readPTauHeader(fdOld, sections);
+
+    const sG1 = curve.G1.F.n8*2;
+    const sG2 = curve.G2.F.n8*2;
+
+    for (let p=1; p<power; p++) {
+        await generateTruncate(p);
+    }
+
+    await fdOld.close();
+
+    return true;
+
+    async function generateTruncate(p) {
+
+        let sP = p.toString();
+        while (sP.length<2) sP = "0" + sP;
+
+        if (logger) logger.debug("Writing Power: "+sP);
+
+        const fdNew = await binFileUtils.createBinFile(template + sP + ".ptau", "ptau", 1, 11);
+        await utils.writePTauHeader(fdNew, curve, p, ceremonyPower);
+
+        await binFileUtils.copySection(fdOld, sections, fdNew, 2, ((2 ** p)*2-1) * sG1 ); // tagG1
+        await binFileUtils.copySection(fdOld, sections, fdNew, 3, (2 ** p) * sG2); // tauG2
+        await binFileUtils.copySection(fdOld, sections, fdNew, 4, (2 ** p) * sG1); // alfaTauG1
+        await binFileUtils.copySection(fdOld, sections, fdNew, 5, (2 ** p) * sG1); // betaTauG1
+        await binFileUtils.copySection(fdOld, sections, fdNew, 6,  sG2); // betaTauG2
+        await binFileUtils.copySection(fdOld, sections, fdNew, 7); // contributions
+        await binFileUtils.copySection(fdOld, sections, fdNew, 12, ((2 ** (p+1))*2 -1) * sG1); // L_tauG1
+        await binFileUtils.copySection(fdOld, sections, fdNew, 13, ((2 ** p)*2 -1) * sG2); // L_tauG2
+        await binFileUtils.copySection(fdOld, sections, fdNew, 14, ((2 ** p)*2 -1) * sG1); // L_alfaTauG1
+        await binFileUtils.copySection(fdOld, sections, fdNew, 15, ((2 ** p)*2 -1) * sG1); // L_betaTauG1
+
+        await fdNew.close();
+    }
+
+
+}
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/powersoftau_utils.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+import { Scalar } from "ffjavascript";
+import Blake2b from "blake2b-wasm";
+import * as keyPair from "./keypair.js";
+import * as misc from "./misc.js";
+import { getCurveFromQ } from "./curves.js";
+
+export async function writePTauHeader(fd, curve, power, ceremonyPower) {
+    // Write the header
+    ///////////
+
+    if (! ceremonyPower) ceremonyPower = power;
+    await fd.writeULE32(1); // Header type
+    const pHeaderSize = fd.pos;
+    await fd.writeULE64(0); // Temporally set to 0 length
+
+    await fd.writeULE32(curve.F1.n64*8);
+
+    const buff = new Uint8Array(curve.F1.n8);
+    Scalar.toRprLE(buff, 0, curve.q, curve.F1.n8);
+    await fd.write(buff);
+    await fd.writeULE32(power);                    // power
+    await fd.writeULE32(ceremonyPower);               // power
+
+    const headerSize = fd.pos - pHeaderSize - 8;
+
+    const oldPos = fd.pos;
+
+    await fd.writeULE64(headerSize, pHeaderSize);
+
+    fd.pos = oldPos;
+}
+
+export async function readPTauHeader(fd, sections) {
+    if (!sections[1])  throw new Error(fd.fileName + ": File has no  header");
+    if (sections[1].length>1) throw new Error(fd.fileName +": File has more than one header");
+
+    fd.pos = sections[1][0].p;
+    const n8 = await fd.readULE32();
+    const buff = await fd.read(n8);
+    const q = Scalar.fromRprLE(buff);
+
+    const curve = await getCurveFromQ(q);
+
+    if (curve.F1.n64*8 != n8) throw new Error(fd.fileName +": Invalid size");
+
+    const power = await fd.readULE32();
+    const ceremonyPower = await fd.readULE32();
+
+    if (fd.pos-sections[1][0].p != sections[1][0].size) throw new Error("Invalid PTau header size");
+
+    return {curve, power, ceremonyPower};
+}
+
+
+export async function readPtauPubKey(fd, curve, montgomery) {
+
+    const buff = await fd.read(curve.F1.n8*2*6 + curve.F2.n8*2*3);
+
+    return fromPtauPubKeyRpr(buff, 0, curve, montgomery);
+}
+
+export function fromPtauPubKeyRpr(buff, pos, curve, montgomery) {
+
+    const key = {
+        tau: {},
+        alpha: {},
+        beta: {}
+    };
+
+    key.tau.g1_s = readG1();
+    key.tau.g1_sx = readG1();
+    key.alpha.g1_s = readG1();
+    key.alpha.g1_sx = readG1();
+    key.beta.g1_s = readG1();
+    key.beta.g1_sx = readG1();
+    key.tau.g2_spx = readG2();
+    key.alpha.g2_spx = readG2();
+    key.beta.g2_spx = readG2();
+
+    return key;
+
+    function readG1() {
+        let p;
+        if (montgomery) {
+            p = curve.G1.fromRprLEM( buff, pos );
+        } else {
+            p = curve.G1.fromRprUncompressed( buff, pos );
+        }
+        pos += curve.G1.F.n8*2;
+        return p;
+    }
+
+    function readG2() {
+        let p;
+        if (montgomery) {
+            p = curve.G2.fromRprLEM( buff, pos );
+        } else {
+            p = curve.G2.fromRprUncompressed( buff, pos );
+        }
+        pos += curve.G2.F.n8*2;
+        return p;
+    }
+}
+
+export function toPtauPubKeyRpr(buff, pos, curve, key, montgomery) {
+
+    writeG1(key.tau.g1_s);
+    writeG1(key.tau.g1_sx);
+    writeG1(key.alpha.g1_s);
+    writeG1(key.alpha.g1_sx);
+    writeG1(key.beta.g1_s);
+    writeG1(key.beta.g1_sx);
+    writeG2(key.tau.g2_spx);
+    writeG2(key.alpha.g2_spx);
+    writeG2(key.beta.g2_spx);
+
+    async function writeG1(p) {
+        if (montgomery) {
+            curve.G1.toRprLEM(buff, pos, p);
+        } else {
+            curve.G1.toRprUncompressed(buff, pos, p);
+        }
+        pos += curve.F1.n8*2;
+    }
+
+    async function writeG2(p) {
+        if (montgomery) {
+            curve.G2.toRprLEM(buff, pos, p);
+        } else {
+            curve.G2.toRprUncompressed(buff, pos, p);
+        }
+        pos += curve.F2.n8*2;
+    }
+
+    return buff;
+}
+
+export async function writePtauPubKey(fd, curve, key, montgomery) {
+    const buff = new Uint8Array(curve.F1.n8*2*6 + curve.F2.n8*2*3);
+    toPtauPubKeyRpr(buff, 0, curve, key, montgomery);
+    await fd.write(buff);
+}
+
+async function readContribution(fd, curve) {
+    const c = {};
+
+    c.tauG1 = await readG1();
+    c.tauG2 = await readG2();
+    c.alphaG1 = await readG1();
+    c.betaG1 = await readG1();
+    c.betaG2 = await readG2();
+    c.key = await readPtauPubKey(fd, curve, true);
+    c.partialHash = await fd.read(216);
+    c.nextChallenge = await fd.read(64);
+    c.type = await fd.readULE32();
+
+    const buffV  = new Uint8Array(curve.G1.F.n8*2*6+curve.G2.F.n8*2*3);
+    toPtauPubKeyRpr(buffV, 0, curve, c.key, false);
+
+    const responseHasher = Blake2b(64);
+    responseHasher.setPartialHash(c.partialHash);
+    responseHasher.update(buffV);
+    c.responseHash = responseHasher.digest();
+
+    const paramLength = await fd.readULE32();
+    const curPos = fd.pos;
+    let lastType =0;
+    while (fd.pos-curPos < paramLength) {
+        const buffType = await readDV(1);
+        if (buffType[0]<= lastType) throw new Error("Parameters in the contribution must be sorted");
+        lastType = buffType[0];
+        if (buffType[0]==1) {     // Name
+            const buffLen = await readDV(1);
+            const buffStr = await readDV(buffLen[0]);
+            c.name = new TextDecoder().decode(buffStr);
+        } else if (buffType[0]==2) {
+            const buffExp = await readDV(1);
+            c.numIterationsExp = buffExp[0];
+        } else if (buffType[0]==3) {
+            const buffLen = await readDV(1);
+            c.beaconHash = await readDV(buffLen[0]);
+        } else {
+            throw new Error("Parameter not recognized");
+        }
+    }
+    if (fd.pos != curPos + paramLength) {
+        throw new Error("Parametes do not match");
+    }
+
+    return c;
+
+    async function readG1() {
+        const pBuff = await fd.read(curve.G1.F.n8*2);
+        return curve.G1.fromRprLEM( pBuff );
+    }
+
+    async function readG2() {
+        const pBuff = await fd.read(curve.G2.F.n8*2);
+        return curve.G2.fromRprLEM( pBuff );
+    }
+
+    async function readDV(n) {
+        const b = await fd.read(n);
+        return new Uint8Array(b);
+    }
+}
+
+export async function readContributions(fd, curve, sections) {
+    if (!sections[7])  throw new Error(fd.fileName + ": File has no  contributions");
+    if (sections[7][0].length>1) throw new Error(fd.fileName +": File has more than one contributions section");
+
+    fd.pos = sections[7][0].p;
+    const nContributions = await fd.readULE32();
+    const contributions = [];
+    for (let i=0; i<nContributions; i++) {
+        const c = await readContribution(fd, curve);
+        c.id = i+1;
+        contributions.push(c);
+    }
+
+    if (fd.pos-sections[7][0].p != sections[7][0].size) throw new Error("Invalid contribution section size");
+
+    return contributions;
+}
+
+async function writeContribution(fd, curve, contribution) {
+
+    const buffG1 = new Uint8Array(curve.F1.n8*2);
+    const buffG2 = new Uint8Array(curve.F2.n8*2);
+    await writeG1(contribution.tauG1);
+    await writeG2(contribution.tauG2);
+    await writeG1(contribution.alphaG1);
+    await writeG1(contribution.betaG1);
+    await writeG2(contribution.betaG2);
+    await writePtauPubKey(fd, curve, contribution.key, true);
+    await fd.write(contribution.partialHash);
+    await fd.write(contribution.nextChallenge);
+    await fd.writeULE32(contribution.type || 0);
+
+    const params = [];
+    if (contribution.name) {
+        params.push(1);      // Param Name
+        const nameData = new TextEncoder("utf-8").encode(contribution.name.substring(0,64));
+        params.push(nameData.byteLength);
+        for (let i=0; i<nameData.byteLength; i++) params.push(nameData[i]);
+    }
+    if (contribution.type == 1) {
+        params.push(2);      // Param numIterationsExp
+        params.push(contribution.numIterationsExp);
+
+        params.push(3);      // Beacon Hash
+        params.push(contribution.beaconHash.byteLength);
+        for (let i=0; i<contribution.beaconHash.byteLength; i++) params.push(contribution.beaconHash[i]);
+    }
+    if (params.length>0) {
+        const paramsBuff = new Uint8Array(params);
+        await fd.writeULE32(paramsBuff.byteLength);
+        await fd.write(paramsBuff);
+    } else {
+        await fd.writeULE32(0);
+    }
+
+
+    async function writeG1(p) {
+        curve.G1.toRprLEM(buffG1, 0, p);
+        await fd.write(buffG1);
+    }
+
+    async function writeG2(p) {
+        curve.G2.toRprLEM(buffG2, 0, p);
+        await fd.write(buffG2);
+    }
+
+}
+
+export async function writeContributions(fd, curve, contributions) {
+
+    await fd.writeULE32(7); // Header type
+    const pContributionsSize = fd.pos;
+    await fd.writeULE64(0); // Temporally set to 0 length
+
+    await fd.writeULE32(contributions.length);
+    for (let i=0; i< contributions.length; i++) {
+        await writeContribution(fd, curve, contributions[i]);
+    }
+    const contributionsSize = fd.pos - pContributionsSize - 8;
+
+    const oldPos = fd.pos;
+
+    await fd.writeULE64(contributionsSize, pContributionsSize);
+    fd.pos = oldPos;
+}
+
+export function calculateFirstChallengeHash(curve, power, logger) {
+    if (logger) logger.debug("Calculating First Challenge Hash");
+
+    const hasher = new Blake2b(64);
+
+    const vG1 = new Uint8Array(curve.G1.F.n8*2);
+    const vG2 = new Uint8Array(curve.G2.F.n8*2);
+    curve.G1.toRprUncompressed(vG1, 0, curve.G1.g);
+    curve.G2.toRprUncompressed(vG2, 0, curve.G2.g);
+
+    hasher.update(Blake2b(64).digest());
+
+    let n;
+
+    n=(2 ** power)*2 -1;
+    if (logger) logger.debug("Calculate Initial Hash: tauG1");
+    hashBlock(vG1, n);
+    n= 2 ** power;
+    if (logger) logger.debug("Calculate Initial Hash: tauG2");
+    hashBlock(vG2, n);
+    if (logger) logger.debug("Calculate Initial Hash: alphaTauG1");
+    hashBlock(vG1, n);
+    if (logger) logger.debug("Calculate Initial Hash: betaTauG1");
+    hashBlock(vG1, n);
+    hasher.update(vG2);
+
+    return hasher.digest();
+
+    function hashBlock(buff, n) {
+        // this block size is a good compromise between speed and the maximum
+        // input size of the Blake2b update method (65,535,720 bytes).
+        const blockSize = 341000;
+        const nBlocks = Math.floor(n / blockSize);
+        const rem = n % blockSize;
+        const bigBuff = new Uint8Array(blockSize * buff.byteLength);
+        for (let i=0; i<blockSize; i++) {
+            bigBuff.set(buff, i*buff.byteLength);
+        }
+        for (let i=0; i<nBlocks; i++) {
+            hasher.update(bigBuff);
+            if (logger) logger.debug("Initial hash: " +i*blockSize);
+        }
+        for (let i=0; i<rem; i++) {
+            hasher.update(buff);
+        }
+    }
+}
+
+
+export function keyFromBeacon(curve, challengeHash, beaconHash, numIterationsExp) {
+
+    const rng = misc.rngFromBeaconParams(beaconHash, numIterationsExp);
+
+    const key = keyPair.createPTauKey(curve, challengeHash, rng);
+
+    return key;
+}
+
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/powersoftau_verify.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+import Blake2b from "blake2b-wasm";
+import * as utils from "./powersoftau_utils.js";
+import * as keyPair from "./keypair.js";
+import crypto from "crypto";
+import * as binFileUtils from "@iden3/binfileutils";
+import { ChaCha, BigBuffer } from "ffjavascript";
+import * as misc from "./misc.js";
+const sameRatio = misc.sameRatio;
+
+async function verifyContribution(curve, cur, prev, logger) {
+    let sr;
+    if (cur.type == 1) {    // Verify the beacon.
+        const beaconKey = utils.keyFromBeacon(curve, prev.nextChallenge, cur.beaconHash, cur.numIterationsExp);
+
+        if (!curve.G1.eq(cur.key.tau.g1_s, beaconKey.tau.g1_s)) {
+            if (logger) logger.error(`BEACON key (tauG1_s) is not generated correctly in challenge #${cur.id}  ${cur.name || ""}` );
+            return false;
+        }
+        if (!curve.G1.eq(cur.key.tau.g1_sx, beaconKey.tau.g1_sx)) {
+            if (logger) logger.error(`BEACON key (tauG1_sx) is not generated correctly in challenge #${cur.id}  ${cur.name || ""}` );
+            return false;
+        }
+        if (!curve.G2.eq(cur.key.tau.g2_spx, beaconKey.tau.g2_spx)) {
+            if (logger) logger.error(`BEACON key (tauG2_spx) is not generated correctly in challenge #${cur.id}  ${cur.name || ""}` );
+            return false;
+        }
+
+        if (!curve.G1.eq(cur.key.alpha.g1_s, beaconKey.alpha.g1_s)) {
+            if (logger) logger.error(`BEACON key (alphaG1_s) is not generated correctly in challenge #${cur.id}  ${cur.name || ""}` );
+            return false;
+        }
+        if (!curve.G1.eq(cur.key.alpha.g1_sx, beaconKey.alpha.g1_sx)) {
+            if (logger) logger.error(`BEACON key (alphaG1_sx) is not generated correctly in challenge #${cur.id}  ${cur.name || ""}` );
+            return false;
+        }
+        if (!curve.G2.eq(cur.key.alpha.g2_spx, beaconKey.alpha.g2_spx)) {
+            if (logger) logger.error(`BEACON key (alphaG2_spx) is not generated correctly in challenge #${cur.id}  ${cur.name || ""}` );
+            return false;
+        }
+
+        if (!curve.G1.eq(cur.key.beta.g1_s, beaconKey.beta.g1_s)) {
+            if (logger) logger.error(`BEACON key (betaG1_s) is not generated correctly in challenge #${cur.id}  ${cur.name || ""}` );
+            return false;
+        }
+        if (!curve.G1.eq(cur.key.beta.g1_sx, beaconKey.beta.g1_sx)) {
+            if (logger) logger.error(`BEACON key (betaG1_sx) is not generated correctly in challenge #${cur.id}  ${cur.name || ""}` );
+            return false;
+        }
+        if (!curve.G2.eq(cur.key.beta.g2_spx, beaconKey.beta.g2_spx)) {
+            if (logger) logger.error(`BEACON key (betaG2_spx) is not generated correctly in challenge #${cur.id}  ${cur.name || ""}` );
+            return false;
+        }
+    }
+
+    cur.key.tau.g2_sp = curve.G2.toAffine(keyPair.getG2sp(curve, 0, prev.nextChallenge, cur.key.tau.g1_s, cur.key.tau.g1_sx));
+    cur.key.alpha.g2_sp = curve.G2.toAffine(keyPair.getG2sp(curve, 1, prev.nextChallenge, cur.key.alpha.g1_s, cur.key.alpha.g1_sx));
+    cur.key.beta.g2_sp = curve.G2.toAffine(keyPair.getG2sp(curve, 2, prev.nextChallenge, cur.key.beta.g1_s, cur.key.beta.g1_sx));
+
+    sr = await sameRatio(curve, cur.key.tau.g1_s, cur.key.tau.g1_sx, cur.key.tau.g2_sp, cur.key.tau.g2_spx);
+    if (sr !== true) {
+        if (logger) logger.error("INVALID key (tau) in challenge #"+cur.id);
+        return false;
+    }
+
+    sr = await sameRatio(curve, cur.key.alpha.g1_s, cur.key.alpha.g1_sx, cur.key.alpha.g2_sp, cur.key.alpha.g2_spx);
+    if (sr !== true) {
+        if (logger) logger.error("INVALID key (alpha) in challenge #"+cur.id);
+        return false;
+    }
+
+    sr = await sameRatio(curve, cur.key.beta.g1_s, cur.key.beta.g1_sx, cur.key.beta.g2_sp, cur.key.beta.g2_spx);
+    if (sr !== true) {
+        if (logger) logger.error("INVALID key (beta) in challenge #"+cur.id);
+        return false;
+    }
+
+    sr = await sameRatio(curve, prev.tauG1, cur.tauG1, cur.key.tau.g2_sp, cur.key.tau.g2_spx);
+    if (sr !== true) {
+        if (logger) logger.error("INVALID tau*G1. challenge #"+cur.id+" It does not follow the previous contribution");
+        return false;
+    }
+
+    sr = await sameRatio(curve,  cur.key.tau.g1_s, cur.key.tau.g1_sx, prev.tauG2, cur.tauG2);
+    if (sr !== true) {
+        if (logger) logger.error("INVALID tau*G2. challenge #"+cur.id+" It does not follow the previous contribution");
+        return false;
+    }
+
+    sr = await sameRatio(curve, prev.alphaG1, cur.alphaG1, cur.key.alpha.g2_sp, cur.key.alpha.g2_spx);
+    if (sr !== true) {
+        if (logger) logger.error("INVALID alpha*G1. challenge #"+cur.id+" It does not follow the previous contribution");
+        return false;
+    }
+
+    sr = await sameRatio(curve, prev.betaG1, cur.betaG1, cur.key.beta.g2_sp, cur.key.beta.g2_spx);
+    if (sr !== true) {
+        if (logger) logger.error("INVALID beta*G1. challenge #"+cur.id+" It does not follow the previous contribution");
+        return false;
+    }
+
+    sr = await sameRatio(curve,  cur.key.beta.g1_s, cur.key.beta.g1_sx, prev.betaG2, cur.betaG2);
+    if (sr !== true) {
+        if (logger) logger.error("INVALID beta*G2. challenge #"+cur.id+"It does not follow the previous contribution");
+        return false;
+    }
+
+    if (logger) logger.info("Powers Of tau file OK!");
+    return true;
+}
+
+export default async function verify(tauFilename, logger) {
+    let sr;
+    await Blake2b.ready();
+
+    const {fd, sections} = await binFileUtils.readBinFile(tauFilename, "ptau", 1);
+    const {curve, power, ceremonyPower} = await utils.readPTauHeader(fd, sections);
+    const contrs = await utils.readContributions(fd, curve, sections);
+
+    if (logger) logger.debug("power: 2**" + power);
+    // Verify Last contribution
+
+    if (logger) logger.debug("Computing initial contribution hash");
+    const initialContribution = {
+        tauG1: curve.G1.g,
+        tauG2: curve.G2.g,
+        alphaG1: curve.G1.g,
+        betaG1: curve.G1.g,
+        betaG2: curve.G2.g,
+        nextChallenge: utils.calculateFirstChallengeHash(curve, ceremonyPower, logger),
+        responseHash: Blake2b(64).digest()
+    };
+
+    if (contrs.length == 0) {
+        if (logger) logger.error("This file has no contribution! It cannot be used in production");
+        return false;
+    }
+
+    let prevContr;
+    if (contrs.length>1) {
+        prevContr = contrs[contrs.length-2];
+    } else {
+        prevContr = initialContribution;
+    }
+    const curContr = contrs[contrs.length-1];
+    if (logger) logger.debug("Validating contribution #"+contrs[contrs.length-1].id);
+    const res = await verifyContribution(curve, curContr, prevContr, logger);
+    if (!res) return false;
+
+
+    const nextContributionHasher = Blake2b(64);
+    nextContributionHasher.update(curContr.responseHash);
+
+    // Verify powers and compute nextChallengeHash
+
+    // await test();
+
+    // Verify Section tau*G1
+    if (logger) logger.debug("Verifying powers in tau*G1 section");
+    const rTau1 = await processSection(2, "G1", "tauG1", (2 ** power)*2-1, [0, 1], logger);
+    sr = await sameRatio(curve, rTau1.R1, rTau1.R2, curve.G2.g, curContr.tauG2);
+    if (sr !== true) {
+        if (logger) logger.error("tauG1 section. Powers do not match");
+        return false;
+    }
+    if (!curve.G1.eq(curve.G1.g, rTau1.singularPoints[0])) {
+        if (logger) logger.error("First element of tau*G1 section must be the generator");
+        return false;
+    }
+    if (!curve.G1.eq(curContr.tauG1, rTau1.singularPoints[1])) {
+        if (logger) logger.error("Second element of tau*G1 section does not match the one in the contribution section");
+        return false;
+    }
+
+    // await test();
+
+    // Verify Section tau*G2
+    if (logger) logger.debug("Verifying powers in tau*G2 section");
+    const rTau2 = await processSection(3, "G2", "tauG2", 2 ** power, [0, 1],  logger);
+    sr = await sameRatio(curve, curve.G1.g, curContr.tauG1, rTau2.R1, rTau2.R2);
+    if (sr !== true) {
+        if (logger) logger.error("tauG2 section. Powers do not match");
+        return false;
+    }
+    if (!curve.G2.eq(curve.G2.g, rTau2.singularPoints[0])) {
+        if (logger) logger.error("First element of tau*G2 section must be the generator");
+        return false;
+    }
+    if (!curve.G2.eq(curContr.tauG2, rTau2.singularPoints[1])) {
+        if (logger) logger.error("Second element of tau*G2 section does not match the one in the contribution section");
+        return false;
+    }
+
+    // Verify Section alpha*tau*G1
+    if (logger) logger.debug("Verifying powers in alpha*tau*G1 section");
+    const rAlphaTauG1 = await processSection(4, "G1", "alphatauG1", 2 ** power, [0], logger);
+    sr = await sameRatio(curve, rAlphaTauG1.R1, rAlphaTauG1.R2, curve.G2.g, curContr.tauG2);
+    if (sr !== true) {
+        if (logger) logger.error("alphaTauG1 section. Powers do not match");
+        return false;
+    }
+    if (!curve.G1.eq(curContr.alphaG1, rAlphaTauG1.singularPoints[0])) {
+        if (logger) logger.error("First element of alpha*tau*G1 section (alpha*G1) does not match the one in the contribution section");
+        return false;
+    }
+
+    // Verify Section beta*tau*G1
+    if (logger) logger.debug("Verifying powers in beta*tau*G1 section");
+    const rBetaTauG1 = await processSection(5, "G1", "betatauG1", 2 ** power, [0], logger);
+    sr = await sameRatio(curve, rBetaTauG1.R1, rBetaTauG1.R2, curve.G2.g, curContr.tauG2);
+    if (sr !== true) {
+        if (logger) logger.error("betaTauG1 section. Powers do not match");
+        return false;
+    }
+    if (!curve.G1.eq(curContr.betaG1, rBetaTauG1.singularPoints[0])) {
+        if (logger) logger.error("First element of beta*tau*G1 section (beta*G1) does not match the one in the contribution section");
+        return false;
+    }
+
+    //Verify Beta G2
+    const betaG2 = await processSectionBetaG2(logger);
+    if (!curve.G2.eq(curContr.betaG2, betaG2)) {
+        if (logger) logger.error("betaG2 element in betaG2 section does not match the one in the contribution section");
+        return false;
+    }
+
+
+    const nextContributionHash = nextContributionHasher.digest();
+
+    // Check the nextChallengeHash
+    if (power == ceremonyPower) {
+        if (!misc.hashIsEqual(nextContributionHash,curContr.nextChallenge)) {
+            if (logger) logger.error("Hash of the values does not match the next challenge of the last contributor in the contributions section");
+            return false;
+        }
+    }
+
+    if (logger) logger.info(misc.formatHash(nextContributionHash, "Next challenge hash: "));
+
+    // Verify Previous contributions
+
+    printContribution(curContr, prevContr);
+    for (let i = contrs.length-2; i>=0; i--) {
+        const curContr = contrs[i];
+        const prevContr =  (i>0) ? contrs[i-1] : initialContribution;
+        const res = await verifyContribution(curve, curContr, prevContr, logger);
+        if (!res) return false;
+        printContribution(curContr, prevContr, logger);
+    }
+    if (logger) logger.info("-----------------------------------------------------");
+
+    if ((!sections[12]) || (!sections[13]) || (!sections[14]) || (!sections[15])) {
+        if (logger) logger.warn(
+            "this file does not contain phase2 precalculated values. Please run: \n" +
+            "   snarkjs \"powersoftau preparephase2\" to prepare this file to be used in the phase2 ceremony."
+        );
+    } else {
+        let res;
+        res = await verifyLagrangeEvaluations("G1", 2, 12, "tauG1", logger);
+        if (!res) return false;
+        res = await verifyLagrangeEvaluations("G2", 3, 13, "tauG2", logger);
+        if (!res) return false;
+        res = await verifyLagrangeEvaluations("G1", 4, 14, "alphaTauG1", logger);
+        if (!res) return false;
+        res = await verifyLagrangeEvaluations("G1", 5, 15, "betaTauG1", logger);
+        if (!res) return false;
+    }
+
+    await fd.close();
+
+    if (logger) logger.info("Powers of Tau Ok!");
+
+    return true;
+
+    function printContribution(curContr, prevContr) {
+        if (!logger) return;
+        logger.info("-----------------------------------------------------");
+        logger.info(`Contribution #${curContr.id}: ${curContr.name ||""}`);
+
+        logger.info(misc.formatHash(curContr.nextChallenge, "Next Challenge: "));
+
+        const buffV  = new Uint8Array(curve.G1.F.n8*2*6+curve.G2.F.n8*2*3);
+        utils.toPtauPubKeyRpr(buffV, 0, curve, curContr.key, false);
+
+        const responseHasher = Blake2b(64);
+        responseHasher.setPartialHash(curContr.partialHash);
+        responseHasher.update(buffV);
+        const responseHash = responseHasher.digest();
+
+        logger.info(misc.formatHash(responseHash, "Response Hash:"));
+
+        logger.info(misc.formatHash(prevContr.nextChallenge, "Response Hash:"));
+
+        if (curContr.type == 1) {
+            logger.info(`Beacon generator: ${misc.byteArray2hex(curContr.beaconHash)}`);
+            logger.info(`Beacon iterations Exp: ${curContr.numIterationsExp}`);
+        }
+
+    }
+
+    async function processSectionBetaG2(logger) {
+        const G = curve.G2;
+        const sG = G.F.n8*2;
+        const buffUv = new Uint8Array(sG);
+
+        if (!sections[6])  {
+            logger.error("File has no BetaG2 section");
+            throw new Error("File has no BetaG2 section");
+        }
+        if (sections[6].length>1) {
+            logger.error("File has no BetaG2 section");
+            throw new Error("File has more than one GetaG2 section");
+        }
+        fd.pos = sections[6][0].p;
+
+        const buff = await fd.read(sG);
+        const P = G.fromRprLEM(buff);
+
+        G.toRprUncompressed(buffUv, 0, P);
+        nextContributionHasher.update(buffUv);
+
+        return P;
+    }
+
+    async function processSection(idSection, groupName, sectionName, nPoints, singularPointIndexes, logger) {
+        const MAX_CHUNK_SIZE = 1<<16;
+        const G = curve[groupName];
+        const sG = G.F.n8*2;
+        await binFileUtils.startReadUniqueSection(fd, sections, idSection);
+
+        const singularPoints = [];
+
+        let R1 = G.zero;
+        let R2 = G.zero;
+
+        let lastBase = G.zero;
+
+        for (let i=0; i<nPoints; i += MAX_CHUNK_SIZE) {
+            if (logger) logger.debug(`points relations: ${sectionName}: ${i}/${nPoints} `);
+            const n = Math.min(nPoints - i, MAX_CHUNK_SIZE);
+            const bases = await fd.read(n*sG);
+
+            const basesU = await G.batchLEMtoU(bases);
+            nextContributionHasher.update(basesU);
+
+            const scalars = new Uint8Array(4*(n-1));
+            crypto.randomFillSync(scalars);
+
+
+            if (i>0) {
+                const firstBase = G.fromRprLEM(bases, 0);
+                const r = crypto.randomBytes(4).readUInt32BE(0, true);
+
+                R1 = G.add(R1, G.timesScalar(lastBase, r));
+                R2 = G.add(R2, G.timesScalar(firstBase, r));
+            }
+
+            const r1 = await G.multiExpAffine(bases.slice(0, (n-1)*sG), scalars);
+            const r2 = await G.multiExpAffine(bases.slice(sG), scalars);
+
+            R1 = G.add(R1, r1);
+            R2 = G.add(R2, r2);
+
+            lastBase = G.fromRprLEM( bases, (n-1)*sG);
+
+            for (let j=0; j<singularPointIndexes.length; j++) {
+                const sp = singularPointIndexes[j];
+                if ((sp >=i) && (sp < i+n)) {
+                    const P = G.fromRprLEM(bases, (sp-i)*sG);
+                    singularPoints.push(P);
+                }
+            }
+
+        }
+        await binFileUtils.endReadSection(fd);
+
+        return {
+            R1: R1,
+            R2: R2,
+            singularPoints: singularPoints
+        };
+
+    }
+
+    async function verifyLagrangeEvaluations(gName, tauSection, lagrangeSection, sectionName, logger) {
+
+        if (logger) logger.debug(`Verifying phase2 calculated values ${sectionName}...`);
+        const G = curve[gName];
+        const sG = G.F.n8*2;
+
+        const seed= new Array(8);
+        for (let i=0; i<8; i++) {
+            seed[i] = crypto.randomBytes(4).readUInt32BE(0, true);
+        }
+
+        for (let p=0; p<= power; p ++) {
+            const res = await verifyPower(p);
+            if (!res) return false;
+        }
+
+        if (tauSection == 2) {
+            const res = await verifyPower(power+1);
+            if (!res) return false;
+        }
+
+        return true;
+
+        async function verifyPower(p) {
+            if (logger) logger.debug(`Power ${p}...`);
+            const n8r = curve.Fr.n8;
+            const nPoints = 2 ** p;
+            let buff_r = new Uint32Array(nPoints);
+            let buffG;
+
+            let rng = new ChaCha(seed);
+
+            if (logger) logger.debug(`Creating random numbers Powers${p}...`);
+            for (let i=0; i<nPoints; i++) {
+                if ((p == power+1)&&(i == nPoints-1)) {
+                    buff_r[i] = 0;
+                } else {
+                    buff_r[i] = rng.nextU32();
+                }
+            }
+
+            buff_r = new Uint8Array(buff_r.buffer, buff_r.byteOffset, buff_r.byteLength);
+
+            if (logger) logger.debug(`reading points Powers${p}...`);
+            await binFileUtils.startReadUniqueSection(fd, sections, tauSection);
+            buffG = new BigBuffer(nPoints*sG);
+            if (p == power+1) {
+                await fd.readToBuffer(buffG, 0, (nPoints-1)*sG);
+                buffG.set(curve.G1.zeroAffine, (nPoints-1)*sG);
+            } else {
+                await fd.readToBuffer(buffG, 0, nPoints*sG);
+            }
+            await binFileUtils.endReadSection(fd, true);
+
+            const resTau = await G.multiExpAffine(buffG, buff_r, logger, sectionName + "_" + p);
+
+            buff_r = new BigBuffer(nPoints * n8r);
+
+            rng = new ChaCha(seed);
+
+            const buff4 = new Uint8Array(4);
+            const buff4V = new DataView(buff4.buffer);
+
+            if (logger) logger.debug(`Creating random numbers Powers${p}...`);
+            for (let i=0; i<nPoints; i++) {
+                if ((i != nPoints-1) || (p != power+1)) {
+                    buff4V.setUint32(0, rng.nextU32(), true);
+                    buff_r.set(buff4, i*n8r);
+                }
+            }
+
+            if (logger) logger.debug(`batchToMontgomery ${p}...`);
+            buff_r = await curve.Fr.batchToMontgomery(buff_r);
+            if (logger) logger.debug(`fft ${p}...`);
+            buff_r = await curve.Fr.fft(buff_r);
+            if (logger) logger.debug(`batchFromMontgomery ${p}...`);
+            buff_r = await curve.Fr.batchFromMontgomery(buff_r);
+
+            if (logger) logger.debug(`reading points Lagrange${p}...`);
+            await binFileUtils.startReadUniqueSection(fd, sections, lagrangeSection);
+            fd.pos += sG*((2 ** p)-1);
+            await fd.readToBuffer(buffG, 0, nPoints*sG);
+            await binFileUtils.endReadSection(fd, true);
+
+            const resLagrange = await G.multiExpAffine(buffG, buff_r, logger, sectionName + "_" + p + "_transformed");
+
+            if (!G.eq(resTau, resLagrange)) {
+                if (logger) logger.error("Phase2 caclutation does not match with powers of tau");
+                return false;
+            }
+
+            return true;
+        }
+    }
+}
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/powersoftau.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+export {default as newAccumulator} from "./powersoftau_new.js";
+export {default as exportChallenge} from "./powersoftau_export_challenge.js";
+export {default as importResponse} from "./powersoftau_import.js";
+export {default as verify} from "./powersoftau_verify.js";
+export {default as challengeContribute} from "./powersoftau_challenge_contribute.js";
+export {default as beacon} from "./powersoftau_beacon.js";
+export {default as contribute} from "./powersoftau_contribute.js";
+export {default as preparePhase2} from "./powersoftau_preparephase2.js";
+export {default as truncate} from "./powersoftau_truncate.js";
+export {default as convert} from "./powersoftau_convert.js";
+export {default as exportJson} from "./powersoftau_export_json.js";
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/r1cs_export_json.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+import {readR1cs}  from "r1csfile";
+import { stringifyBigIntsWithField } from "./misc.js";
+
+
+export default async function r1csExportJson(r1csFileName, logger) {
+
+    const cir = await readR1cs(r1csFileName, true, true, true, logger);
+    const Fr=cir.curve.Fr;
+    delete cir.curve;
+    delete cir.F;
+
+    return stringifyBigIntsWithField(Fr, cir);
+}
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/r1cs_info.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+import { Scalar } from "ffjavascript";
+import { readR1cs }  from "r1csfile";
+
+const bls12381r = Scalar.e("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001", 16);
+const bn128r = Scalar.e("21888242871839275222246405745257275088548364400416034343698204186575808495617");
+
+export default async function r1csInfo(r1csName, logger) {
+
+    const cir = await readR1cs(r1csName);
+
+    if (Scalar.eq(cir.prime, bn128r)) {
+        if (logger) logger.info("Curve: bn-128");
+    } else if (Scalar.eq(cir.prime, bls12381r)) {
+        if (logger) logger.info("Curve: bls12-381");
+    } else {
+        if (logger) logger.info(`Unknown Curve. Prime: ${Scalar.toString(cir.prime)}`);
+    }
+    if (logger) logger.info(`# of Wires: ${cir.nVars}`);
+    if (logger) logger.info(`# of Constraints: ${cir.nConstraints}`);
+    if (logger) logger.info(`# of Private Inputs: ${cir.nPrvInputs}`);
+    if (logger) logger.info(`# of Public Inputs: ${cir.nPubInputs}`);
+    if (logger) logger.info(`# of Labels: ${cir.nLabels}`);
+    if (logger) logger.info(`# of Outputs: ${cir.nOutputs}`);
+
+    return cir;
+}
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/r1cs_print.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+export default function r1csPrint(r1cs, syms, logger) {
+    for (let i=0; i<r1cs.constraints.length; i++) {
+        printCostraint(r1cs.constraints[i]);
+    }
+    function printCostraint(c) {
+        const lc2str = (lc) => {
+            let S = "";
+            const keys = Object.keys(lc);
+            keys.forEach( (k) => {
+                let name = syms.varIdx2Name[k];
+                if (name == "one") name = "";
+
+                let vs = r1cs.curve.Fr.toString(lc[k]);
+                if (vs == "1") vs = "";  // Do not show ones
+                if (vs == "-1") vs = "-";  // Do not show ones
+                if ((S!="")&&(vs[0]!="-")) vs = "+"+vs;
+                if (S!="") vs = " "+vs;
+                S= S + vs   + name;
+            });
+            return S;
+        };
+        const S = `[ ${lc2str(c[0])} ] * [ ${lc2str(c[1])} ] - [ ${lc2str(c[2])} ] = 0`;
+        if (logger) logger.info(S);
+    }
+
+}
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/r1cs.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+export {default as print} from "./r1cs_print.js";
+export {default as info} from "./r1cs_info.js";
+export {default as exportJson} from "./r1cs_export_json.js";
+
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/solidity.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+export {default as genGroth16Verifier} from "./solidity_gengroth16verifier.js";
+export {default as prove} from "./groth16_prove.js";
+export {default as validate} from "./groth16_verify.js";
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/taskmanager.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+const inBrowser = (typeof window !== "undefined");
+let NodeWorker;
+if (!inBrowser) {
+    NodeWorker = require("worker_threads").Worker;
+}
+
+class Deferred {
+    constructor() {
+        this.promise = new Promise((resolve, reject)=> {
+            this.reject = reject;
+            this.resolve = resolve;
+        });
+    }
+}
+
+
+function thread(self, fn, modules) {
+
+    const ctx = {
+        modules: modules
+    };
+
+    self.onmessage = function(e) {
+        let data;
+        if (e.data) {
+            data = e.data;
+        } else {
+            data = e;
+        }
+
+        if (data.cmd == "INIT") {
+            ctx.processId = data.processId;
+        }
+
+
+        if (data.cmd == "TERMINATE") {
+            self.postMessage({cmd: "TERMINATE"});
+            process.exit();
+            return;
+        }
+
+        let res = fn(ctx, data);
+
+        res = res || {};
+
+        res.cmd = data.cmd;
+
+        if (res) {
+            if (res.buff) {
+                self.postMessage(res, [res.buff.buffer]);
+            } else {
+                self.postMessage(res);
+            }
+        }
+    };
+
+}
+
+
+async function buildTaskManager(fn, mods, initTask) {
+
+    let concurrency;
+    if ((typeof(navigator) === "object") && navigator.hardwareConcurrency) {
+        concurrency = navigator.hardwareConcurrency;
+    } else {
+        const os = require("os");
+        concurrency = os.cpus().length;
+    }
+
+    const tm = {
+        workers: []
+    };
+
+    let S = "{";
+    const keys = Object.keys(mods);
+    for (let i=0; i<keys.length; i++) {
+        const key= keys[i];
+        S += `${key}: require('${mods[key]}'), `;
+    }
+    S += "}";
+
+
+    function getOnMsg(i) {
+
+        return function(e) {
+
+            function finishTask() {
+                if  ( (tm.waitingTask && tm.terminateDeferred))
+                    throw new Error("It can  not be a waiting task and it's terminating");
+
+                if (tm.terminateDeferred) {
+                    tm.workers[i].worker.postMessage({cmd: "TERMINATE"});
+                    return;
+                }
+
+                tm.workers[i].state = "READY";
+
+                if (tm.waitingTask) {
+                    processTask(i, tm.waitingTask.task, tm.waitingTask.asyncCb);
+                    const d = tm.waitingTask.deferral;
+                    tm.waitingTask = null;
+                    d.resolve();
+                }
+
+            }
+
+            let data;
+            if ((e)&&(e.data)) {
+                data = e.data;
+            } else {
+                data = e;
+            }
+
+            if (data.cmd == "TERMINATE") {
+                tm.workers[i].state = "TERMINATED";
+                tm.tryTerminate();
+                return;
+            }
+
+            if (tm.workers[i].asyncCb) {
+                tm.workers[i].asyncCb(data).then(()=> {
+                    finishTask();
+                });
+            } else {
+                finishTask();
+            }
+        };
+    }
+
+    function processTask(i, task, asyncCb) {
+        if (tm.workers[i].state != "READY")
+            throw new Error("Worker is not ready");
+        tm.workers[i].asyncCb = asyncCb;
+
+        tm.workers[i].state = "WORKING";
+        if (task.buff) {
+            tm.workers[i].worker.postMessage(task, [task.buff.buffer]);
+        } else {
+            tm.workers[i].worker.postMessage(task);
+        }
+    }
+
+    for (let i=0; i<concurrency; i++) {
+
+        const worker = new NodeWorker(`(${thread.toString()})(require('worker_threads').parentPort, ${fn.toString()},${S});`, {eval: true});
+
+        worker.on("message", getOnMsg(i));
+
+        tm.workers[i] = {
+            state: "READY",
+            worker: worker,
+            taskPromise: null
+        };
+
+    }
+
+    for (let i=0; i<concurrency; i++) {
+        initTask.cmd = "INIT";
+        initTask.processId = i;
+        processTask(i, initTask);
+    }
+
+    tm.finish = function() {
+        const self = this;
+        if (self.terminatePromise != null)
+            throw new Error("Task manager already terminated");
+
+        self.terminateDeferred = new Deferred();
+
+        for (let i=0; i<concurrency; i++) {
+            if (self.workers[i].state == "READY") {
+                self.workers[i].worker.postMessage({cmd: "TERMINATE"});
+            }
+        }
+
+        return self.terminateDeferred.promise;
+    };
+
+    tm.addTask = function (task, asyncCb) {
+        const self = this;
+        if  (self.waitingTask) throw new Error("Waiting task pending");
+        if (self.terminateDeferred) throw new Error("New task after task manager terminated");
+        const deferral = new Deferred();
+        let i;
+        for (i=0; i<tm.workers.length; i++) {
+            if (self.workers[i].state == "READY") break;
+        }
+        if (i<tm.workers.length) {
+            processTask(i, task, asyncCb);
+            deferral.resolve();
+        } else {
+            self.waitingTask = {
+                task: task,
+                deferral: deferral,
+                asyncCb: asyncCb
+            };
+        }
+        return deferral.promise;
+    };
+
+    tm.tryTerminate = function() {
+        const self = this;
+        if (!self.terminateDeferred) return;
+        for (let i=0; i<concurrency; i++) {
+            if (self.workers[i].state != "TERMINATED") return;
+        }
+        self.terminateDeferred.resolve();
+    };
+
+    return tm;
+}
+
+module.exports = buildTaskManager;
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/wtns_calculate.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+import * as fastFile from "fastfile";
+import { WitnessCalculatorBuilder } from "circom_runtime";
+import * as wtnsUtils from "./wtns_utils.js";
+import * as binFileUtils from "@iden3/binfileutils";
+import {  utils }   from "ffjavascript";
+const { unstringifyBigInts} = utils;
+
+export default async function wtnsCalculate(_input, wasmFileName, wtnsFileName, options) {
+    const input = unstringifyBigInts(_input);
+
+    const fdWasm = await fastFile.readExisting(wasmFileName);
+    const wasm = await fdWasm.read(fdWasm.totalSize);
+    await fdWasm.close();
+
+    const wc = await WitnessCalculatorBuilder(wasm);
+    if (wc.circom_version() == 1) {
+        const w = await wc.calculateBinWitness(input);
+
+        const fdWtns = await binFileUtils.createBinFile(wtnsFileName, "wtns", 2, 2);
+
+        await wtnsUtils.writeBin(fdWtns, w, wc.prime);
+        await fdWtns.close();
+    } else {
+        const fdWtns = await fastFile.createOverride(wtnsFileName);
+
+        const w = await wc.calculateWTNSBin(input);
+
+        await fdWtns.write(w);
+        await fdWtns.close();
+    }
+}
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/wtns_debug.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+import * as fastFile from "fastfile";
+import { WitnessCalculatorBuilder } from "circom_runtime";
+import * as wtnsUtils from "./wtns_utils.js";
+import * as binFileUtils from "@iden3/binfileutils";
+import loadSyms from "./loadsyms.js";
+import {  utils }   from "ffjavascript";
+const {unstringifyBigInts} = utils;
+
+
+export default async function wtnsDebug(_input, wasmFileName, wtnsFileName, symName, options, logger) {
+
+    const input = unstringifyBigInts(_input);
+
+    const fdWasm = await fastFile.readExisting(wasmFileName);
+    const wasm = await fdWasm.read(fdWasm.totalSize);
+    await fdWasm.close();
+
+
+    let wcOps = {
+        sanityCheck: true
+    };
+    let sym = await loadSyms(symName);
+    if (options.set) {
+        if (!sym) sym = await loadSyms(symName);
+        wcOps.logSetSignal= function(labelIdx, value) {
+            // The line below splits the arrow log into 2 strings to avoid some Secure ECMAScript issues
+            if (logger) logger.info("SET " + sym.labelIdx2Name[labelIdx] + " <" + "-- " + value.toString());
+        };
+    }
+    if (options.get) {
+        if (!sym) sym = await loadSyms(symName);
+        wcOps.logGetSignal= function(varIdx, value) {
+            // The line below splits the arrow log into 2 strings to avoid some Secure ECMAScript issues
+            if (logger) logger.info("GET " + sym.labelIdx2Name[varIdx] + " --" + "> " + value.toString());
+        };
+    }
+    if (options.trigger) {
+        if (!sym) sym = await loadSyms(symName);
+        wcOps.logStartComponent= function(cIdx) {
+            if (logger) logger.info("START: " + sym.componentIdx2Name[cIdx]);
+        };
+        wcOps.logFinishComponent= function(cIdx) {
+            if (logger) logger.info("FINISH: " + sym.componentIdx2Name[cIdx]);
+        };
+    }
+    wcOps.sym = sym;
+
+    const wc = await WitnessCalculatorBuilder(wasm, wcOps);
+    const w = await wc.calculateWitness(input);
+
+    const fdWtns = await binFileUtils.createBinFile(wtnsFileName, "wtns", 2, 2);
+
+    await wtnsUtils.write(fdWtns, w, wc.prime);
+
+    await fdWtns.close();
+}
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/wtns_export_json.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+import {read} from "./wtns_utils.js";
+
+export default async function wtnsExportJson(wtnsFileName) {
+
+    const w = await read(wtnsFileName);
+
+    return w;
+}
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/wtns_utils.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+import { Scalar } from "ffjavascript";
+
+import * as binFileUtils from "@iden3/binfileutils";
+
+
+export async function write(fd, witness, prime) {
+
+    await binFileUtils.startWriteSection(fd, 1);
+    const n8 = (Math.floor( (Scalar.bitLength(prime) - 1) / 64) +1)*8;
+    await fd.writeULE32(n8);
+    await binFileUtils.writeBigInt(fd, prime, n8);
+    await fd.writeULE32(witness.length);
+    await binFileUtils.endWriteSection(fd);
+
+    await binFileUtils.startWriteSection(fd, 2);
+    for (let i=0; i<witness.length; i++) {
+        await binFileUtils.writeBigInt(fd, witness[i], n8);
+    }
+    await binFileUtils.endWriteSection(fd, 2);
+
+
+}
+
+export async function writeBin(fd, witnessBin, prime) {
+
+    await binFileUtils.startWriteSection(fd, 1);
+    const n8 = (Math.floor( (Scalar.bitLength(prime) - 1) / 64) +1)*8;
+    await fd.writeULE32(n8);
+    await binFileUtils.writeBigInt(fd, prime, n8);
+    if (witnessBin.byteLength % n8 != 0) {
+        throw new Error("Invalid witness length");
+    }
+    await fd.writeULE32(witnessBin.byteLength / n8);
+    await binFileUtils.endWriteSection(fd);
+
+
+    await binFileUtils.startWriteSection(fd, 2);
+    await fd.write(witnessBin);
+    await binFileUtils.endWriteSection(fd);
+
+}
+
+export async function readHeader(fd, sections) {
+
+    await binFileUtils.startReadUniqueSection(fd, sections, 1);
+    const n8 = await fd.readULE32();
+    const q = await binFileUtils.readBigInt(fd, n8);
+    const nWitness = await fd.readULE32();
+    await binFileUtils.endReadSection(fd);
+
+    return {n8, q, nWitness};
+
+}
+
+export async function read(fileName) {
+
+    const {fd, sections} = await binFileUtils.readBinFile(fileName, "wtns", 2);
+
+    const {n8, nWitness} = await readHeader(fd, sections);
+
+    await binFileUtils.startReadUniqueSection(fd, sections, 2);
+    const res = [];
+    for (let i=0; i<nWitness; i++) {
+        const v = await binFileUtils.readBigInt(fd, n8);
+        res.push(v);
+    }
+    await binFileUtils.endReadSection(fd);
+
+    await fd.close();
+
+    return res;
+}
+
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/wtns.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+export {default as calculate} from "./wtns_calculate.js";
+export {default as debug} from "./wtns_debug.js";
+export {default as exportJson} from "./wtns_export_json.js";
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/zkey_beacon.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+import * as binFileUtils from "@iden3/binfileutils";
+import * as chunkFileUtils from "./chunk_utils.js";
+import * as zkeyUtils from "./zkey_utils.js";
+import { getCurveFromQ as getCurve } from "./curves.js";
+import * as misc from "./misc.js";
+import Blake2b from "blake2b-wasm";
+import * as utils from "./zkey_utils.js";
+import { hashToG2 as hashToG2 } from "./keypair.js";
+import { applyKeyToSection } from "./mpc_applykey.js";
+
+
+export default async function beacon(zkeyNameOld, zkeyNameNew, name, beaconHashStr, numIterationsExp, logger) {
+    await Blake2b.ready();
+
+    const beaconHash = misc.hex2ByteArray(beaconHashStr);
+    if (   (beaconHash.byteLength == 0)
+        || (beaconHash.byteLength*2 !=beaconHashStr.length))
+    {
+        if (logger) logger.error("Invalid Beacon Hash. (It must be a valid hexadecimal sequence)");
+        return false;
+    }
+    if (beaconHash.length>=256) {
+        if (logger) logger.error("Maximum lenght of beacon hash is 255 bytes");
+        return false;
+    }
+
+    numIterationsExp = parseInt(numIterationsExp);
+    if ((numIterationsExp<10)||(numIterationsExp>63)) {
+        if (logger) logger.error("Invalid numIterationsExp. (Must be between 10 and 63)");
+        return false;
+    }
+
+
+    const maxZKeyVersion = 2;
+    const zkey = await zkeyUtils.readHeader(zkeyNameOld, maxZKeyVersion);
+
+    if (zkey.protocol != "groth16") {
+        throw new Error("zkey file is not groth16");
+    }
+
+
+    const curve = await getCurve(zkey.q);
+
+    const mpcParams = await zkeyUtils.readMPCParams(zkeyNameOld, maxZKeyVersion, curve);
+
+    const fdNew = await binFileUtils.createBinFile(zkeyNameNew, "zkey", 1, 10);
+
+    const rng = await misc.rngFromBeaconParams(beaconHash, numIterationsExp);
+
+    const transcriptHasher = Blake2b(64);
+    transcriptHasher.update(mpcParams.csHash);
+    for (let i=0; i<mpcParams.contributions.length; i++) {
+        utils.hashPubKey(transcriptHasher, curve, mpcParams.contributions[i]);
+    }
+
+    const curContribution = {};
+    curContribution.delta = {};
+    curContribution.delta.prvKey = curve.Fr.fromRng(rng);
+    curContribution.delta.g1_s = curve.G1.toAffine(curve.G1.fromRng(rng));
+    curContribution.delta.g1_sx = curve.G1.toAffine(curve.G1.timesFr(curContribution.delta.g1_s, curContribution.delta.prvKey));
+    utils.hashG1(transcriptHasher, curve, curContribution.delta.g1_s);
+    utils.hashG1(transcriptHasher, curve, curContribution.delta.g1_sx);
+    curContribution.transcript = transcriptHasher.digest();
+    curContribution.delta.g2_sp = hashToG2(curve, curContribution.transcript);
+    curContribution.delta.g2_spx = curve.G2.toAffine(curve.G2.timesFr(curContribution.delta.g2_sp, curContribution.delta.prvKey));
+
+    zkey.vk_delta_1 = curve.G1.timesFr(zkey.vk_delta_1, curContribution.delta.prvKey);
+    zkey.vk_delta_2 = curve.G2.timesFr(zkey.vk_delta_2, curContribution.delta.prvKey);
+
+    curContribution.deltaAfter = zkey.vk_delta_1;
+
+    curContribution.type = 1;
+    curContribution.numIterationsExp = numIterationsExp;
+    curContribution.beaconHash = beaconHash;
+
+    if (name) curContribution.name = name;
+
+    mpcParams.contributions.push(curContribution);
+
+    await zkeyUtils.writeHeader(zkeyNameNew, zkey);
+
+    // IC
+    await chunkFileUtils.copySectionFile(zkeyNameOld, zkeyNameNew, 3);
+
+    // Coeffs (Keep original)
+    await chunkFileUtils.copySectionFile(zkeyNameOld, zkeyNameNew, 4);
+
+    // A Section
+    await chunkFileUtils.copySectionFile(zkeyNameOld, zkeyNameNew, 5);
+
+    // B1 Section
+    await chunkFileUtils.copySectionFile(zkeyNameOld, zkeyNameNew, 6);
+
+    // B2 Section
+    await chunkFileUtils.copySectionFile(zkeyNameOld, zkeyNameNew, 7);
+
+    const invDelta = curve.Fr.inv(curContribution.delta.prvKey);
+    await applyKeyToSection(zkeyNameOld, maxZKeyVersion, zkeyNameNew, 8, curve, "G1", invDelta, curve.Fr.e(1), "L Section", logger);
+    await applyKeyToSection(zkeyNameOld, maxZKeyVersion, zkeyNameNew, 9, curve, "G1", invDelta, curve.Fr.e(1), "H Section", logger);
+
+    await zkeyUtils.writeMPCParams(zkeyNameNew, curve, mpcParams);
+
+    const contributionHasher = Blake2b(64);
+    utils.hashPubKey(contributionHasher, curve, curContribution);
+
+    const contribuionHash = contributionHasher.digest();
+
+    if (logger) logger.info(misc.formatHash(contribuionHash, "Contribution Hash: "));
+
+    return contribuionHash;
+}
+
+
+
+---
+File: /@zk-email/helpers/node_modules/snarkjs/src/zkey_bellman_contribute.js
+---
+
+/*
+    Copyright 2018 0KIMS association.
+
+    This file is part of snarkJS.
+
+    snarkJS is a free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    snarkJS is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+    or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+    License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with snarkJS. If not, see <https://www.gnu.org/licenses/>.
+*/
+
+// Format of the output
+//      Hash of the last contribution  64 Bytes
+//      2^N*2-1 TauG1 Points (compressed)
+//      2^N TauG2 Points (compressed)
+//      2^N AlphaTauG1 Points (compressed)
+//      2^N BetaTauG1 Points (compressed)
+//      Public Key
+//          BetaG2 (compressed)
+//          G1*s (compressed)
+//          G1*s*tau (compressed)
+//          G1*t (compressed)
+//          G1*t*alpha (compressed)
+//          G1*u (compressed)
+//          G1*u*beta (compressed)
+//          G2*sp*tau (compressed)
+//          G2*tp*alpha (compressed)
+//          G2*up*beta (compressed)
+
+import * as fastFile from "fastfile";
+import Blake2b from "blake2b-wasm";
+import * as utils from "./zkey_utils.js";
+import * as misc from "./misc.js";
+import { applyKeyToChallengeSection } from "./mpc_applykey.js";
+import { hashPubKey } from "./zkey_utils.js";
+import { hashToG2 as hashToG2 } from "./keypair.js";
+
+export default async function bellmanContribute(curve, challengeFilename, responesFileName, entropy, logger) {
+    await Blake2b.ready();
+
+    const rng = await misc.getRandomRng(entropy);
+
+    const delta = curve.Fr.fromRng(rng);
+    const invDelta = curve.Fr.inv(delta);
+
+    const sG1 = curve.G1.F.n8*2;
+    const sG2 = curve.G2.F.n8*2;
+
+    const fdFrom = await fastFile.readExisting(challengeFilename);
+    const fdTo = await fastFile.createOverride(responesFileName);
+
+
+    await copy(sG1); // alpha1
+    await copy(sG1); // beta1
+    await copy(sG2); // beta2
+    await copy(sG2); // gamma2
+    const oldDelta1 = await readG1();
+    const delta1 = curve.G1.timesFr(oldDelta1, delta);
+    await writeG1(delta1);
+    const oldDelta2 = await readG2();
+    const delta2 = curve.G2.timesFr(oldDelta2, delta);
+    await writeG2(delta2);
+
+    // IC
+    const nIC = await fdFrom.readUBE32();
+    await fdTo.writeUBE32(nIC);
+    await copy(nIC*sG1);
+
+    // H
+    const nH = await fdFrom.readUBE32();
+    await fdTo.writeUBE32(nH);
+    await applyKeyToChallengeSection(fdFrom, fdTo, null, curve, "G1", nH, invDelta, curve.Fr.e(1), "UNCOMPRESSED", "H", logger);
+
+    // L
+    const nL = await fdFrom.readUBE32();
+    await fdTo.writeUBE32(nL);
+    await applyKeyToChallengeSection(fdFrom, fdTo, null, curve, "G1", nL, invDelta, curve.Fr.e(1), "UNCOMPRESSED", "L", logger);
+
+    // A
+    const nA = await fdFrom.readUBE32();
+    await fdTo.writeUBE32(nA);
+    await copy(nA*sG1);
+
+    // B1
+    const nB1 = await fdFrom.readUBE32();
+    await fdTo.writeUBE32(nB1);
+    await copy(nB1*sG1);
+
+    // B2
+    const nB2 = await fdFrom.readUBE32();
+    await fdTo.writeUBE32(nB2);
+    await copy(nB2*sG2);
+
+
+    //////////
+    /// Read contributions
+    //////////
+    const transcriptHasher = Blake2b(64);
+
+    const mpcParams = {};
+    // csHash
+    mpcParams.csHash =  await fdFrom.read(64);
+    transcriptHasher.update(mpcParams.csHash);
+
+    const nConttributions = await fdFrom.readUBE32();
+    mpcParams.contributions = [];
+    for (let i=0; i<nConttributions; i++) {
+        const c = { delta:{} };
+        c.deltaAfter = await readG1();
+        c.delta.g1_s = await readG1();
+        c.delta.g1_sx = await readG1();
+        c.delta.g2_spx = await readG2();
+        c.transcript = await fdFrom.read(64);
+        mpcParams.contributions.push(c);
+        hashPubKey(transcriptHasher, curve, c);
+    }
+
+    const curContribution = {};
+    curContribution.delta = {};
+    curContribution.delta.prvKey = delta;
+    curContribution.delta.g1_s = curve.G1.toAffine(curve.G1.fromRng(rng));
+    curContribution.delta.g1_sx = curve.G1.toAffine(curve.G1.timesFr(curContribution.delta.g1_s, delta));
+    utils.hashG1(transcriptHasher, curve, curContribution.delta.g1_s);
+    utils.hashG1(transcriptHasher, curve, curContribution.delta.g1_sx);
+    curContribution.transcript = transcriptHasher.digest();
+    curContribution.delta.g2_sp = hashToG2(curve, curContribution.transcript);
+    curContribution.delta.g2_spx = curve.G2.toAffine(curve.G2.timesFr(curContribution.delta.g2_sp, delta));
+    curContribution.deltaAfter = delta1;
+    curContribution.type = 0;
+    mpcParams.contributions.push(curContribution);
+
+
+    //////////
+    /// Write COntribution
+    //////////
+
+    await fdTo.write(mpcParams.csHash);
+    await fdTo.writeUBE32(mpcParams.contributions.length);
+
+    for (let i=0; i<mpcParams.contributions.length; i++) {
+        const c = mpcParams.contributions[i];
+        await writeG1(c.deltaAfter);
+        await writeG1(c.delta.g1_s);
+        await writeG1(c.delta.g1_sx);
+        await writeG2(c.delta.g2_spx);
+        await fdTo.write(c.transcript);
+    }
+
+    const contributionHasher = Blake2b(64);
+    hashPubKey(contributionHasher, curve, curContribution);
