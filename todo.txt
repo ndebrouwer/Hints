@@ -1,0 +1,194 @@
+-compile circom code
+-export key with snarkjs or libsnark (cpp)
+-convert the key into a binary file for easier deserialization with cpp
+-Store sensitive files (verification_key.bin, proof.bin, etc.) securely within the TEE.
+-Use TEE APIs to handle encryption/decryption of input files as needed.
+-Compile the code for the TEE platform (e.g., Intel SGX).
+-Use the enclave SDK to handle the interaction between the secure and untrusted portions of your application.
+-Test locally outside the TEE to ensure correctness.
+-Test within the TEE to validate secure execution.
+-note that the offervalidator.cpp uses 'public input paths' as keywords to be verified, but we also have a public 
+
+
+# Compile without WebSocket (no BOOST):
+g++ -std=c++17 main.cpp TEEEngine.cpp TEEStorage.cpp OfferValidator.cpp OnChainPoster.cpp \
+    -I. -o tee_service
+
+# Or compile with WebSocket server:
+g++ -std=c++17 main.cpp TEEEngine.cpp TEEStorage.cpp OfferValidator.cpp OnChainPoster.cpp \
+    WebSocketServer.cpp -DUSE_BOOST_BEAST \
+    -I. -lboost_system -lssl -lcrypto -lpthread -o tee_service
+
+# Then run:
+./tee_service <path_to_verification_key_file>
+
+
+
+// ------------------------------------------------------------
+// (3) Refactored EmailVerifierWithKeywords using the new template
+// ------------------------------------------------------------
+pragma circom 2.2.1;
+
+include "../node_modules/circomlib/circuits/bitify.circom";
+include "../node_modules/circomlib/circuits/comparators.circom";
+include "../node_modules/circomlib/circuits/mux1.circom";
+include "../node_modules/circomlib/circuits/poseidon.circom";
+include "../node_modules/@zk-email/zk-regex-circom/circuits/common/body_hash_regex.circom";
+include "../node_modules/@zk-email/circuits/helpers/remove-soft-line-breaks.circom";
+include "../node_modules/@zk-email/circuits/lib/base64.circom";
+include "../node_modules/@zk-email/circuits/lib/rsa.circom";
+include "../node_modules/@zk-email/circuits/lib/sha.circom";
+include "../node_modules/@zk-email/circuits/utils/array.circom";
+include "../node_modules/@zk-email/circuits/utils/regex.circom";
+include "../node_modules/@zk-email/circuits/utils/hash.circom";
+include "../node_modules/@zk-email/circuits/utils/bytes.circom";
+include "../node_modules/@zk-email/circuits/email-verifier.circom";
+include "../node_modules/@zk-email/circuits/helpers/email-nullifier.circom";
+include "./PolyRollingHash.circom";
+include "./RollingHashArray.circom";
+include "./RabinKarp.circom";
+
+//-------------------------------------
+// Refactored EmailVerifierWithKeywords
+//-------------------------------------
+template EmailVerifierWithKeywords(
+    maxHeadersLength,
+    maxBodyLength,
+    n,
+    k,
+    ignoreBodyHashCheck,
+    enableHeaderMasking,
+    enableBodyMasking,
+    removeSoftLineBreaks,
+    maxKeywords,
+    maxKeywordLen,
+    bitPerChunk,
+    chunkSize
+) {
+    signal input emailHeader[maxHeadersLength];
+    signal input emailHeaderLength;
+    signal input pubkey[k];
+    signal input signature[k];
+    signal input bodyHashIndex;
+    signal input precomputedSHA[32];
+    signal input emailBody[maxBodyLength];
+    signal input emailBodyLength;
+    signal input decodedEmailBodyIn[maxBodyLength];
+    signal input bodyMask[maxBodyLength];
+    signal input headerMask[maxHeadersLength];
+
+    // EmailVerifier outputs
+    signal output pubkeyHash;
+    signal output maskedHeader[maxHeadersLength];
+    signal output maskedBody[maxBodyLength];
+    signal output allKeywordsPresent;
+    signal output nullifier;
+
+    // Instantiate underlying EmailVerifier
+    component emailVerifier = EmailVerifier(
+        maxHeadersLength,
+        maxBodyLength,
+        n,
+        k,
+        ignoreBodyHashCheck,
+        enableHeaderMasking,
+        enableBodyMasking,
+        removeSoftLineBreaks
+    );
+
+    // Connect signals
+    emailVerifier.emailHeader <== emailHeader;
+    emailVerifier.emailHeaderLength <== emailHeaderLength;
+    emailVerifier.pubkey <== pubkey;
+    emailVerifier.signature <== signature;
+
+    if (ignoreBodyHashCheck != 1) {
+        emailVerifier.bodyHashIndex <== bodyHashIndex;
+        emailVerifier.precomputedSHA <== precomputedSHA;
+        emailVerifier.emailBody <== emailBody;
+        emailVerifier.emailBodyLength <== emailBodyLength;
+
+        if (removeSoftLineBreaks == 1) {
+            emailVerifier.decodedEmailBodyIn <== decodedEmailBodyIn;
+        }
+        if (enableBodyMasking == 1) {
+            emailVerifier.bodyMask <== bodyMask;
+            emailVerifier.headerMask <== headerMask;
+        }
+    }
+
+    pubkeyHash <== emailVerifier.pubkeyHash;
+    if (enableHeaderMasking == 1) {
+        maskedHeader <== emailVerifier.maskedHeader;
+    }
+    if (enableBodyMasking == 1 && ignoreBodyHashCheck != 1) {
+        maskedBody <== emailVerifier.maskedBody;
+    }
+
+    // 4) Instantiate RabinKarpKeywords to check for all keywords in the verified body
+    signal input numKeywords;
+    signal input keywords[maxKeywords][maxKeywordLen];
+    var BASE = 256;
+
+    component rabinKarp = RabinKarpKeywords(
+        maxBodyLength,
+        maxKeywordLen,
+        maxKeywords,
+        32,         // bitwidth for LessThan
+        BASE
+    );
+
+    for (var i = 0; i < maxBodyLength; i++) {
+        rabinKarp.emailBody[i] <== emailBody[i];
+    }
+    for (var i = 0; i < maxKeywords; i++) {
+        for (var c = 0; c < maxKeywordLen; c++) {
+            rabinKarp.keywords[i][c] <== keywords[i][c];
+        }
+    }
+    rabinKarp.numKeywords <== numKeywords;
+    allKeywordsPresent <== rabinKarp.allKeywordsPresent;
+
+    // Nullifier Calculation
+    component emailNullifier = EmailNullifier(bitPerChunk, chunkSize);
+    for (var i = 0; i < chunkSize; i++) {
+        emailNullifier.signature[i] <== signature[i];
+    }
+    nullifier <== emailNullifier.out;
+    //log("EmailVerifierWithKeywords refactored: finished nullifier");
+}
+
+
+RABIN KARP BLOCK:
+ // 4) Instantiate RabinKarpKeywords to check for all keywords in the verified body
+    signal input numKeywords;
+    signal input keywords[maxKeywords][maxKeywordLen];
+    var BASE = 256;
+
+    component rabinKarp = RabinKarpKeywords(
+        maxBodyLength,
+        maxKeywordLen,
+        maxKeywords,
+        32,         // bitwidth for LessThan
+        BASE
+    );
+
+    for (var i = 0; i < maxBodyLength; i++) {
+        rabinKarp.emailBody[i] <== emailBody[i];
+    }
+    for (var i = 0; i < maxKeywords; i++) {
+        for (var c = 0; c < maxKeywordLen; c++) {
+            rabinKarp.keywords[i][c] <== keywords[i][c];
+        }
+    }
+    rabinKarp.numKeywords <== numKeywords;
+    allKeywordsPresent <== rabinKarp.allKeywordsPresent;
+
+NULLIFIER BLOCK   
+component emailNullifier = EmailNullifier(bitPerChunk, chunkSize);
+    for (var i = 0; i < chunkSize; i++) {
+        emailNullifier.signature[i] <== signature[i];
+    }
+    nullifier <== emailNullifier.out;
+    //log("EmailVerifierWithKeywords refactored: finished nullifier");
+}

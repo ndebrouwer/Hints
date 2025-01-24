@@ -1,5 +1,4 @@
 pragma circom 2.2.1;
-
 include "../node_modules/circomlib/circuits/bitify.circom";
 include "../node_modules/circomlib/circuits/comparators.circom";
 include "../node_modules/circomlib/circuits/mux1.circom";
@@ -14,80 +13,13 @@ include "../node_modules/@zk-email/circuits/utils/regex.circom";
 include "../node_modules/@zk-email/circuits/utils/hash.circom";
 include "../node_modules/@zk-email/circuits/utils/bytes.circom";
 include "../node_modules/@zk-email/circuits/email-verifier.circom";
+include "../node_modules/@zk-email/circuits/helpers/email-nullifier.circom";
+include "./PolyRollingHash.circom";
+include "./RollingHashArray.circom";
+include "./RabinKarp.circom";
 
 //-------------------------------------
-// Rabin-Karp: Polynomial rolling hash for a fixed substring length
-//-------------------------------------
-template PolyRollingHash(length, base) {
-    signal input str[length];
-    signal output hashVal;
-    signal output basePow[length + 1];
-
-    // Precompute powers of base
-    basePow[0] <== 1;
-    for (var i = 0; i < length; i++) {
-        basePow[i + 1] <== basePow[i] * base;
-    }
-
-    // sum up all partial products
-    signal sumHash <== 0;
-
-    signal partial[length]; // declare array once
-    for (var j = 0; j < length; j++) {
-        partial[j] <== str[j] * basePow[j];
-        sumHash <== sumHash + partial[j];
-    }
-
-    hashVal <== sumHash;
-}
-
-//-------------------------------------
-// Rabin-Karp: Rolling hash array for scanning the entire body
-//-------------------------------------
-template RollingHashArray(
-    maxBodyLength,
-    maxKeywordLen,
-    base
-) {
-    signal input emailBody[maxBodyLength];
-    signal output rollingHash[maxBodyLength - maxKeywordLen + 1];
-
-    // (1) Compute the hash for the first window [0..maxKeywordLen - 1].
-    component firstHash = PolyRollingHash(maxKeywordLen, base);
-    for (var i = 0; i < maxKeywordLen; i++) {
-        firstHash.str[i] <== emailBody[i];
-    }
-    rollingHash[0] <== firstHash.hashVal;
-
-    // (2) We'll do rolling updates for j=0..(numSubstrings-1).
-    var loopSize = maxBodyLength - maxKeywordLen;
-    
-    // Declare signals as arrays outside the loop:
-    signal oldHash[loopSize];
-    signal oldChar[loopSize];
-    signal newChar[loopSize];
-    signal subVal[loopSize];
-    signal mulVal[loopSize];
-    signal nextHash[loopSize];
-
-    for (var j = 0; j < loopSize; j++) {
-        oldHash[j] <== rollingHash[j];
-        oldChar[j] <== emailBody[j];
-        newChar[j] <== emailBody[j + maxKeywordLen];
-
-        subVal[j] <== oldHash[j] 
-                      - (oldChar[j] * firstHash.basePow[maxKeywordLen - 1]);
-
-        mulVal[j] <== subVal[j] * firstHash.basePow[1];
-        nextHash[j] <== mulVal[j] + newChar[j];
-
-        rollingHash[j + 1] <== nextHash[j];
-    }
-}
-
-
-//-------------------------------------
-// EmailVerifierWithKeywords using Rabin-Karp for body substring checking
+// Refactored EmailVerifierWithKeywords
 //-------------------------------------
 template EmailVerifierWithKeywords(
     maxHeadersLength,
@@ -99,26 +31,31 @@ template EmailVerifierWithKeywords(
     enableBodyMasking,
     removeSoftLineBreaks,
     maxKeywords,
-    maxKeywordLen
+    maxKeywordLen,
+    bitPerChunk,
+    chunkSize
 ) {
-    // 1) Declare inputs for EmailVerifier
+    //EmailVerifier template inputs
     signal input emailHeader[maxHeadersLength];
     signal input emailHeaderLength;
     signal input pubkey[k];
     signal input signature[k];
-    signal input bodyHashIndex;
-    signal input precomputedSHA[32];
     signal input emailBody[maxBodyLength];
     signal input emailBodyLength;
+    signal input bodyHashIndex;
+    signal input precomputedSHA[32];
     signal input decodedEmailBodyIn[maxBodyLength];
     signal input bodyMask[maxBodyLength];
+    signal input headerMask[maxHeadersLength];
 
-    // 2) Outputs from EmailVerifier
+    // EmailVerifier outputs
     signal output pubkeyHash;
     signal output maskedHeader[maxHeadersLength];
     signal output maskedBody[maxBodyLength];
+    signal output allKeywordsPresent;
+    signal output nullifier;
 
-    // 3) Instantiate the underlying EmailVerifier circuit
+    // Instantiate underlying EmailVerifier
     component emailVerifier = EmailVerifier(
         maxHeadersLength,
         maxBodyLength,
@@ -130,7 +67,7 @@ template EmailVerifierWithKeywords(
         removeSoftLineBreaks
     );
 
-    // Connect emailVerifier signals
+    // Connect signals
     emailVerifier.emailHeader <== emailHeader;
     emailVerifier.emailHeaderLength <== emailHeaderLength;
     emailVerifier.pubkey <== pubkey;
@@ -152,115 +89,44 @@ template EmailVerifierWithKeywords(
 
     pubkeyHash <== emailVerifier.pubkeyHash;
     if (enableHeaderMasking == 1) {
+        emailVerifier.headerMask <== headerMask;
         maskedHeader <== emailVerifier.maskedHeader;
     }
     if (enableBodyMasking == 1 && ignoreBodyHashCheck != 1) {
         maskedBody <== emailVerifier.maskedBody;
     }
 
-    // 4) Add the keyword checks (Rabin-Karp method on the verified body)
+    //RABIN KARP
+    // 4) Instantiate RabinKarpKeywords to check for all keywords in the verified body
     signal input numKeywords;
     signal input keywords[maxKeywords][maxKeywordLen];
-    signal output allKeywordsPresent;
+    var BASE = 256;
 
-    // 4A) Compute hash for each keyword using polynomial rolling hash
-    signal keywordHash[maxKeywords];
-    var BASE = 256; // compile-time constant for base
+    component rabinKarp = RabinKarpKeywords(
+        maxBodyLength,
+        maxKeywordLen,
+        maxKeywords,
+        32,         // bitwidth for LessThan
+        BASE
+    );
 
-    component kwHash[maxKeywords];
+    for (var i = 0; i < maxBodyLength; i++) {
+        rabinKarp.emailBody[i] <== emailBody[i];
+    }
     for (var i = 0; i < maxKeywords; i++) {
-        kwHash[i] = PolyRollingHash(maxKeywordLen, BASE);
         for (var c = 0; c < maxKeywordLen; c++) {
-            kwHash[i].str[c] <== keywords[i][c];
-        }
-        keywordHash[i] <== kwHash[i].hashVal;
-    }
-
-    // 4B) Compute rolling hashes of emailBody for every substring of length maxKeywordLen
-    component bodyRH = RollingHashArray(maxBodyLength, maxKeywordLen, BASE);
-    for (var x = 0; x < maxBodyLength; x++) {
-        bodyRH.emailBody[x] <== emailBody[x];
-    }
-
-    var numSubstrings = maxBodyLength - maxKeywordLen + 1;
-
-    // 4C) Check if rollingHash matches any keyword hash.
-    signal matchArr[maxKeywords][numSubstrings];
-    component eqHash[maxKeywords][numSubstrings];
-
-    for (var ki = 0; ki < maxKeywords; ki++) {
-        for (var j = 0; j < numSubstrings; j++) {
-            eqHash[ki][j] = IsEqual();
-            eqHash[ki][j].in[0] <== bodyRH.rollingHash[j];
-            eqHash[ki][j].in[1] <== keywordHash[ki];
-
-            matchArr[ki][j] <== eqHash[ki][j].out;
+            rabinKarp.keywords[i][c] <== keywords[i][c];
         }
     }
+    rabinKarp.numKeywords <== numKeywords;
+    allKeywordsPresent <== rabinKarp.allKeywordsPresent;
 
-    // (As in standard Rabin-Karp, you might do a fallback character-by-character check
-    //  to guard against collisions, omitted here for brevity.)
-
-    // 4D) OR-chain each row of matchArr[i][:] => keywordFound[i]
-    signal orChain[maxKeywords][numSubstrings + 1];
-    signal keywordFound[maxKeywords];
-
-    signal notOrChain;
-    signal notMatch;
-    for (var i = 0; i < maxKeywords; i++) {
-        orChain[i][0] <== 0;
-        for (var j = 0; j < numSubstrings; j++) {
-            notOrChain <== 1 - orChain[i][j];
-            notMatch <== 1 - matchArr[i][j];
-            orChain[i][j + 1] <== 1 - (notOrChain * notMatch);
-        }
-        keywordFound[i] <== orChain[i][numSubstrings];
+    //NULLIFIER   
+    component emailNullifier = EmailNullifier(bitPerChunk, chunkSize);
+    for (var i = 0; i < chunkSize; i++) {
+        emailNullifier.signature[i] <== signature[i];
     }
+    nullifier <== emailNullifier.out;
+    //log("EmailVerifierWithKeywords refactored: finished nullifier");
 
-    // 4E) If i >= numKeywords, treat keywordFound[i] as automatically found
-    signal iLess[maxKeywords];
-    component cLessThan[maxKeywords];
-    for (var i = 0; i < maxKeywords; i++) {
-        cLessThan[i] = LessThan(32);
-        cLessThan[i].in[0] <== i;
-        cLessThan[i].in[1] <== numKeywords;
-        iLess[i] <== cLessThan[i].out;
-    }
-
-    signal requiredFound[maxKeywords];
-    signal product;
-    signal not_iLess;
-    signal not_keywordFound;
-    for (var i = 0; i < maxKeywords; i++) {
-        not_iLess <== 1 - iLess[i];
-        not_keywordFound <== 1 - keywordFound[i];
-        // product = ( (1 - not_iLess) * not_keywordFound )
-        product <== (1 - not_iLess) * not_keywordFound;
-        // requiredFound[i] = 1 - product
-        requiredFound[i] <== 1 - product;
-    }
-
-    // 4F) allKeywordsPresent = AND of requiredFound[i]
-    signal andChain[maxKeywords + 1];
-    andChain[0] <== 1;
-    for (var i = 0; i < maxKeywords; i++) {
-        andChain[i + 1] <== andChain[i] * requiredFound[i];
-    }
-    allKeywordsPresent <== andChain[maxKeywords];
 }
-
-//-------------------------------------
-// Example instantiation
-//-------------------------------------
-component main = EmailVerifierWithKeywords(
-    1024,    // maxHeadersLength
-    10240,   // maxBodyLength
-    121,     // n
-    17,      // k
-    0,       // ignoreBodyHashCheck
-    1,       // enableHeaderMasking
-    1,       // enableBodyMasking
-    1,       // removeSoftLineBreaks
-    20,      // maxKeywords
-    32       // maxKeywordLen
-);
