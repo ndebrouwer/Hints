@@ -87,28 +87,35 @@ export async function generateVerifierCircuitInputs(
 // -----------------------------------------------------
 (async () => {
   try {
-    // 1. Read a .eml file into memory
-    const rawEmail = fs.readFileSync(
-      path.join(__dirname, "./emls/rawEmail.eml"),
-      "utf8"
-    );
+    // Expecting two arguments: [,, <emlPath>, <ethereumAddress>]
+    const [, , emlPathArg, ethereumAddressArg] = process.argv;
+    
+    if (!emlPathArg || !ethereumAddressArg) {
+      throw new Error(
+        `Usage: ts-node script.ts <emlFilePath> <ethereumAddress>\n\n` +
+        `Example:\n` +
+        `  ts-node script.ts ./emls/rawEmail.eml 0x71C7...`
+      );
+    }
 
-    // 2. Call our function, providing an Ethereum address and keywords
+    // Resolve the file path (handles relative or absolute)
+    const resolvedEmlPath = path.resolve(emlPathArg);
+
+    // Read the email file
+    const rawEmail = fs.readFileSync(resolvedEmlPath, "utf8");
+
+    // Call the generator function, providing keywords as needed
     const inputs = await generateVerifierCircuitInputs(
       rawEmail,
-      "0x71C7656EC7ab88b098defB751B7401B5f6d897",
-      ["keyword1", "keyword2"] // update these as needed
+      ethereumAddressArg,
+      ["keyword1", "keyword2"]
     );
 
-    // 3. Write the resulting inputs to a JSON file
-    fs.writeFileSync(
-      "./inputs.json",
-      JSON.stringify(inputs, null, 2), // pretty-print
-      "utf8"
-    );
-
-    console.log("Successfully generated and wrote inputs.json!");
+    // Write the JSON output to disk
+    fs.writeFileSync("./input.json", JSON.stringify(inputs, null, 2), "utf8");
+    console.log("Successfully generated input.json!");
   } catch (err) {
     console.error("Error:", err);
+    process.exit(1);
   }
 })();
