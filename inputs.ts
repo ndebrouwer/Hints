@@ -1,5 +1,7 @@
 import { bytesToBigInt, fromHex } from "@zk-email/helpers/dist/binary-format";
 import { generateEmailVerifierInputs } from "@zk-email/helpers/dist/input-generators";
+import fs from "fs";
+import path from "path";
 
 export const STRING_PRESELECTOR = "email contains keywords @";
 
@@ -20,7 +22,9 @@ export type IVerifierCircuitInputs = {
 
 async function extractDomain(email: string): Promise<string> {
   const domainMatch = email.match(/@([a-zA-Z0-9.-]+)/);
-  if (!domainMatch) throw new Error(`Invalid email address: ${email}`);
+  if (!domainMatch) {
+    throw new Error(`Invalid email address: ${email}`);
+  }
   return domainMatch[1];
 }
 
@@ -44,14 +48,12 @@ export async function generateVerifierCircuitInputs(
     }
   }
   
-  // Optionally, you could collect indices of the keywords if needed
+  // Collect indices of each keyword
   const keywordIndices = keywords.map((keyword) => {
     const index = bodyStr.indexOf(keyword);
     if (index === -1) throw new Error(`Keyword not found: ${keyword}`);
     return index;
   });
-  
-  // If needed, process `keywordIndices` further
   
   // Extract headers to validate domains
   const headers = emailVerifierInputs.emailHeader.join("\n");
@@ -69,8 +71,6 @@ export async function generateVerifierCircuitInputs(
   const fromDomainMatch = fromDomain === dkimDomain;
   const toDomainMatch = toDomain === dkimDomain;
 
-
-
   const address = bytesToBigInt(fromHex(ethereumAddress)).toString();
 
   return {
@@ -81,3 +81,34 @@ export async function generateVerifierCircuitInputs(
     address,
   };
 }
+
+// -----------------------------------------------------
+// Below is where we ADD the read and write logic:
+// -----------------------------------------------------
+(async () => {
+  try {
+    // 1. Read a .eml file into memory
+    const rawEmail = fs.readFileSync(
+      path.join(__dirname, "./emls/rawEmail.eml"),
+      "utf8"
+    );
+
+    // 2. Call our function, providing an Ethereum address and keywords
+    const inputs = await generateVerifierCircuitInputs(
+      rawEmail,
+      "0x71C7656EC7ab88b098defB751B7401B5f6d897",
+      ["keyword1", "keyword2"] // update these as needed
+    );
+
+    // 3. Write the resulting inputs to a JSON file
+    fs.writeFileSync(
+      "./inputs.json",
+      JSON.stringify(inputs, null, 2), // pretty-print
+      "utf8"
+    );
+
+    console.log("Successfully generated and wrote inputs.json!");
+  } catch (err) {
+    console.error("Error:", err);
+  }
+})();
